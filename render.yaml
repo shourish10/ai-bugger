@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ai-code-debugger
+    env: python
+    buildCommand: ""
+    startCommand: python app.py
+    envVars:
+      - key: AIzaSyAwmOwRg7lwQXZxAYYKI3xto6-SzCH-x-g
+        value: your-gemini-api-key-here
