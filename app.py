@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, make_response
+from flask import Flask, request, render_template_string, make_response, send_file
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
@@ -12,6 +12,7 @@ load_dotenv()
 app = Flask(__name__)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
+# HTML template omitted for brevity (you already have it)
 # HTML Template embedded
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -216,13 +217,13 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
+
 # Global state
 fixed_code_result = ""
 explanation_text = ""
 chat_response = ""
 
 def preprocess_code(code):
-    """Remove markdown and unwanted characters."""
     code = code.replace("```python", "").replace("```java", "").replace("```arduino", "").replace("```", "")
     code = code.replace("\t", "    ")
     code = re.sub(r'[^\x00-\x7F]+', '', code)
@@ -230,7 +231,6 @@ def preprocess_code(code):
     return code.strip()
 
 def get_input_prompts(code):
-    """Extract input prompts safely."""
     prompts = []
     matches = list(re.finditer(r'input\s*\((.*?)\)', code))
     for match in matches:
@@ -242,16 +242,15 @@ def get_input_prompts(code):
     return prompts
 
 def requires_test_input(code):
-    """Check if the code uses input()."""
     patterns = [r'input\s*\(', r'int\s*\(\s*input\s*\(', r'float\s*\(\s*input\s*\(']
     return any(re.search(p, code) for p in patterns)
 
 def fix_code_with_gemini(code, language):
-    """Fix code using Gemini API."""
     global fixed_code_result, explanation_text
     try:
         model = genai.GenerativeModel("models/gemini-1.5-flash")
         chat = model.start_chat()
+
         if language == "java":
             class_match = re.search(r'public\s+class\s+(\w+)', code)
             main_class = class_match.group(1) if class_match else "Main"
@@ -259,24 +258,30 @@ def fix_code_with_gemini(code, language):
 {code}
 Requirements:
 1. Include main class '{main_class}'
-2. Add imports, fix syntax
-3. Format as:
-<corrected_code>
----EXPLANATION---
-<explanation>"""
-        elif language == "arduino":
-            prompt = f"""Fix this Arduino code:
-{code}
-Requirements:
-1. setup() and loop() must be present
-2. Add comments, fix syntax
+2. Add imports and fix syntax
 Format:
 <corrected_code>
 ---EXPLANATION---
 <explanation>"""
+
+        elif language == "arduino":
+            prompt = f"""Fix this Arduino code:
+{code}
+Requirements:
+1. Ensure setup() and loop() are present
+2. Add comments and fix any syntax issues
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+
         else:
             prompt = f"""Fix this Python code:
 {code}
+Requirements:
+1. Correct syntax or logical errors.
+2. Do not convert string to int unless necessary.
+3. Preserve operations like str * int.
 Format:
 <corrected_code>
 ---EXPLANATION---
@@ -290,11 +295,10 @@ Format:
             fixed_code_result = full
             explanation_text = "Explanation not provided."
     except Exception as e:
-        fixed_code_result = f"❌ Error: {str(e)}"
+        fixed_code_result = f"\u274c Error: {str(e)}"
         explanation_text = ""
 
 def execute_java_code(code, main_class):
-    """Compile and run Java code."""
     temp_dir = tempfile.mkdtemp()
     file_path = os.path.join(temp_dir, f"{main_class}.java")
     try:
@@ -302,15 +306,15 @@ def execute_java_code(code, main_class):
             f.write(code)
         compile = subprocess.run(['javac', file_path], cwd=temp_dir, capture_output=True, text=True)
         if compile.returncode != 0:
-            return f"❌ Compilation Error:\n{compile.stderr}"
+            return f"\u274c Compilation Error:\n{compile.stderr}"
         run = subprocess.run(['java', '-cp', temp_dir, main_class], capture_output=True, text=True, timeout=10)
         if run.returncode != 0:
-            return f"❌ Runtime Error:\n{run.stderr}"
-        return run.stdout or "✅ Ran successfully, no output."
+            return f"\u274c Runtime Error:\n{run.stderr}"
+        return run.stdout or "\u2705 Ran successfully, no output."
     except subprocess.TimeoutExpired:
-        return "❌ Execution timed out."
+        return "\u274c Execution timed out."
     except Exception as e:
-        return f"❌ Execution error: {str(e)}"
+        return f"\u274c Execution error: {str(e)}"
     finally:
         try:
             for file in os.listdir(temp_dir):
@@ -319,21 +323,17 @@ def execute_java_code(code, main_class):
         except: pass
 
 def execute_arduino_code(code):
-    """Compile Arduino sketch using arduino-cli."""
     temp_dir = tempfile.mkdtemp()
     sketch = os.path.join(temp_dir, "sketch.ino")
     try:
         with open(sketch, 'w') as f:
             f.write(code)
-        compile = subprocess.run(
-            ['arduino-cli', 'compile', '--fqbn', 'arduino:avr:uno', temp_dir],
-            capture_output=True, text=True
-        )
+        compile = subprocess.run(['arduino-cli', 'compile', '--fqbn', 'arduino:avr:uno', temp_dir], capture_output=True, text=True)
         if compile.returncode != 0:
-            return f"❌ Compilation Error:\n{compile.stderr}"
-        return "✅ Arduino code compiled successfully"
+            return f"\u274c Compilation Error:\n{compile.stderr}"
+        return "\u2705 Arduino code compiled successfully"
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        return f"\u274c Error: {str(e)}"
     finally:
         try:
             for file in os.listdir(temp_dir):
@@ -342,20 +342,19 @@ def execute_arduino_code(code):
         except: pass
 
 def validate_and_execute_code(code, language, test_inputs=None, java_main_class=None):
-    """Run code based on language."""
     try:
         code = preprocess_code(code)
         if language == "python":
             inputs = re.findall(r'input\s*\(.*?\)', code)
             if test_inputs and len(test_inputs) < len(inputs):
-                return f"❌ Not enough test inputs (expected {len(inputs)})"
+                return f"\u274c Not enough test inputs (expected {len(inputs)})"
             for i, call in enumerate(inputs):
                 code = code.replace(call, repr(test_inputs[i]), 1)
             old_stdout = sys.stdout
             sys.stdout = captured = io.StringIO()
             try:
                 exec(code, {})
-                return captured.getvalue().strip() or "✅ Ran successfully."
+                return captured.getvalue().strip() or "\u2705 Ran successfully."
             finally:
                 sys.stdout = old_stdout
         elif language == "java":
@@ -363,8 +362,7 @@ def validate_and_execute_code(code, language, test_inputs=None, java_main_class=
         elif language == "arduino":
             return execute_arduino_code(code)
     except Exception as e:
-        return f"❌ Execution failed: {str(e)}"
-from flask import send_file
+        return f"\u274c Execution failed: {str(e)}"
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -390,7 +388,7 @@ def index():
                 response = model.generate_content(chat_prompt)
                 chat_response = response.text.strip()
             except Exception as e:
-                chat_response = f"❌ Error from AI: {str(e)}"
+                chat_response = f"\u274c Error from AI: {str(e)}"
         else:
             code = request.form.get("code", "")
             java_main_class = request.form.get("java_main_class", "Main")
@@ -403,16 +401,12 @@ def index():
                         input_value = request.form.get(f"test_input_{i}", "")
                         test_inputs.append(input_value)
 
+            # ✅ Fix and execute
             fix_code_with_gemini(code, language)
             result = fixed_code_result
             explanation = explanation_text
+            output = validate_and_execute_code(result, language, test_inputs, java_main_class)
 
-            if language == "python":
-                output = validate_and_execute_code(result, "python", test_inputs=test_inputs)
-            elif language == "java":
-                output = validate_and_execute_code(result, "java", java_main_class=java_main_class)
-            elif language == "arduino":
-                output = validate_and_execute_code(result, "arduino")
 
     return render_template_string(
         HTML_TEMPLATE,
@@ -427,9 +421,9 @@ def index():
         chat_prompt=chat_prompt,
         chat_response=chat_response
     )
+
 @app.route("/download")
 def download():
-    """Download the fixed code with correct file extension."""
     global fixed_code_result
     if "void setup()" in fixed_code_result or "void loop()" in fixed_code_result:
         ext = ".ino"
@@ -443,24 +437,22 @@ def download():
     response.mimetype = "text/plain"
     return response
 
-
 if __name__ == "__main__":
-    # ✅ Optional: Check tool installation before starting app
     try:
         java_check = subprocess.run(['java', '-version'], capture_output=True, text=True)
         print("Java:", java_check.stderr.split('\n')[0])
     except Exception as e:
-        print("⚠️ Java not found or not added to PATH")
+        print("\u26a0\ufe0f Java not found or not added to PATH")
 
     try:
         arduino_check = subprocess.run(['arduino-cli', 'version'], capture_output=True, text=True)
         print("Arduino CLI:", arduino_check.stdout.strip())
     except Exception as e:
-        print("⚠️ Arduino CLI not found or not added to PATH")
+        print("\u26a0\ufe0f Arduino CLI not found or not added to PATH")
 
-    # ✅ Start the Flask app
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
+
 
 
 
