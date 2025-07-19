@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, make_response, send_file
+from flask import Flask, render_template, request, render_template_string, make_response, send_file
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
@@ -18,205 +18,428 @@ HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
     <title>AI Code Debugger</title>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Sans&family=Source+Code+Pro&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/codemirror.min.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Sans:wght@400;900&family=Source+Code+Pro&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/codemirror.min.css" />
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/codemirror.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/python/python.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/clike/clike.min.js"></script>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
+            margin: 0;
             font-family: 'Fira Sans', sans-serif;
-            background-color: #1e1e1e;
-            color: #d4d4d4;
-            padding: 20px;
+            background: #15151e;
+            color: #fff;
         }
+        /* ------------- WELCOME PAGE ------------ */
+        .welcome-screen {
+            display: {{ 'none' if code or result or explanation or output else 'flex' }};
+            height: 100vh;
+            width: 100vw;
+            background: radial-gradient(circle at 20% 30%,#7fdfff77 0%, #a7a6ff66 60%, #23233a 100%);
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.9s cubic-bezier(.7,0,.3,1);
+        }
+        .hero-content {
+            position: relative;
+            z-index: 3;
+            text-align: center;
+        }
+        .hero-content h1 {
+            font-size: 5.9rem;
+            font-weight: 900;
+            color: #000000; /* Changed to black as requested */
+            letter-spacing: 0.02em;
+            margin-bottom: 0.6em;
+            text-shadow: 0 6px 32px #2637ff40, 0 1px 2px #16edd7, 0 8px 40px #3986fd20;
+            font-family: 'Fira Sans', sans-serif;
+            text-align: center;
+            white-space: nowrap; /* Keep text on one line */
+            overflow: hidden; /* Hide overflowing text */
+            border-right: .15em solid orange; /* The typing cursor */
+            animation: 
+              typing 3.5s steps(40, end),
+              blink-caret .75s step-end infinite;
+        }
+
+        /* Typing effect */
+        @keyframes typing {
+          from { width: 0 }
+          to { width: 100% }
+        }
+
+        /* The typewriter cursor effect */
+        @keyframes blink-caret {
+          from, to { border-color: transparent }
+          50% { border-color: orange; }
+        }
+
+        .hero-content p {
+            color: #cbeefd;
+            font-size: 1.3rem;
+            max-width: 500px;
+            margin: 0 auto 2.5em auto;
+            font-weight: 400;
+        }
+        .hero-btn-group {
+            margin-top: 1.7em;
+            display: flex;
+            justify-content: center;
+            gap: 1.3em;
+        }
+        @keyframes blinkColors {
+            0%   { background: linear-gradient(90deg,#6dc6fb 30%, #5affc3 100%); box-shadow: 0 0 18px #54dbff90; }
+            20%  { background: linear-gradient(90deg,#f38eff 30%, #ffd96a 100%); box-shadow: 0 0 21px #fd8ecb70; }
+            40%  { background: linear-gradient(90deg,#5ac8fa 30%,#54dede 100%); box-shadow: 0 0 18px #1be5c350; }
+            60%  { background: linear-gradient(90deg,#a7a6ff 30%,#7fdfff 100%); box-shadow: 0 0 22px #94ffca50;}
+            80%  { background: linear-gradient(90deg,#6dc6fb 30%, #5affc3 100%); box-shadow: 0 0 18px #54dbff90; }
+            100% { background: linear-gradient(90deg,#6dc6fb 30%, #5affc3 100%); box-shadow: 0 0 18px #54dbff90; }
+        }
+        .hero-btn {
+            font-family: inherit;
+            font-size: 1.09rem;
+            color: #183050;
+            border: none;
+            padding: 0.95em 2.3em;
+            border-radius: 30px;
+            font-weight: 700;
+            cursor: pointer;
+            outline: none;
+            animation: blinkColors 1.35s infinite;
+            transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+            box-shadow: 0 3px 24px #2cfbe260;
+        }
+        .hero-btn:hover {
+            color: #0d3144;
+            filter: brightness(1.1);
+        }
+        .hero-btn.login {
+            background: transparent;
+            color: #e2f4fc;
+            border: 2px solid #00dfcc66;
+            box-shadow: none;
+        }
+        .hero-btn.login:hover {
+            background: #131b3144;
+        }
+        /* Floating animated icons */
+        .floating-icons {
+            position: absolute;
+            left: 0; top: 0; width: 100%; height: 100%;
+            z-index: 1;
+            pointer-events: none;
+        }
+        .floating-icon {
+            position: absolute;
+            opacity: 0.2;
+            font-size: 2.3rem;
+            color: #fff;
+            filter: blur(0.5px);
+            animation: floatIcon 8s ease-in-out infinite;
+        }
+        .floating-icon.icon-1 { left: 10%;  top: 18%; font-size: 2.4rem; color: #49ffe0; animation-delay: 0s;}
+        .floating-icon.icon-2 { left: 80%;  top: 12%; font-size: 3.0rem; color: #ffd96a; animation-delay: 1s;}
+        .floating-icon.icon-3 { left: 25%;  top: 70%; font-size: 2.2rem; color: #f38eff; animation-delay: 2.2s;}
+        .floating-icon.icon-4 { left: 70%;  top: 75%; font-size: 2rem; color: #b9ff8a; animation-delay: 4s;}
+        .floating-icon.icon-5 { left: 50%;  top: 45%; font-size: 2.6rem; color: #a9caff; animation-delay: 1.6s;}
+        @keyframes floatIcon {
+            0% {transform: translateY(0);}
+            50% { transform: translateY(-35px); }
+            100% { transform: translateY(0);}
+        }
+        /* ------------- MODAL ------------ */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(34,52,70,0.63);
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+        }
+        .modal-content {
+            background: #2c2f41;
+            padding: 36px 30px 24px 30px;
+            border-radius: 13px;
+            width: 90%;
+            max-width: 430px;
+            text-align: center;
+            box-shadow: 0 2px 44px #272adc65;
+        }
+        .modal input {
+            display: block;
+            width: 100%;
+            padding: 11px;
+            margin: 15px 0;
+            border-radius: 7px;
+            border: none;
+            background: #293360;
+            color: white;
+            font-size: 1.07rem;
+        }
+        .modal button {
+            background: #1af0ff;
+            color: #0e1935;
+            padding: 10px 0;
+            width: 100%;
+            border: none;
+            border-radius: 7px;
+            font-weight: 700;
+            font-size: 1.08rem;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        /* ------------- DEBUGGER PAGE ------------ */
         .container {
+            display: {{ 'block' if code or result or explanation or output else 'none' }};
             max-width: 1400px;
-            margin: auto;
-            padding: 20px;
+            margin: 40px auto;
+            padding: 30px 10px;
+            border-radius: 35px;
+            background: linear-gradient(110deg, #112230 82%, #292d54 100%);
+            box-shadow: 0 8px 48px #0089ff37;
         }
         .header {
-            text-align: center;
-            margin-bottom: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
         }
         .header h1 {
-            font-size: 2.5rem;
-            color: #61dafb;
+            font-size: 2.9rem;
+            font-weight: 900;
+            color: #FFFFFF;
+            margin-bottom: 8px;
+            /* --- MODIFIED TEXT SHADOW AND ADDED TYPING ANIMATION --- */
+            text-shadow: 0 3px 15px #54dbff50, 0 1px 5px #0ffbe050; /* Reduced shadow */
+            font-family: 'Fira Sans', sans-serif;
+            letter-spacing: 0.03em;
+            text-align: center;
+            white-space: nowrap; /* Keep text on one line */
+            overflow: hidden; /* Hide overflowing text */
+            border-right: .15em solid orange; /* The typing cursor */
+            animation: 
+              typing 3.5s steps(40, end),
+              blink-caret .75s step-end infinite;
+        }
+        .header p {
+            color: #b7edff;
+            margin-bottom: 30px;
+            text-align: center;
         }
         .language-tabs {
             display: flex;
-            gap: 10px;
+            gap: 18px;
             margin: 20px 0;
+            justify-content: center;
         }
         .language-tab {
-            padding: 10px 20px;
-            border: 1px solid #444;
-            border-radius: 5px;
+            padding: 8px 26px;
+            border-radius: 10px;
+            border: 1.5px solid #2fe6c9;
+            background: #202745;
+            color: #aaffff;
+            font-size: 1.12rem;
             cursor: pointer;
-            background-color: #333;
-            color: #d4d4d4;
-            transition: all 0.3s;
+            font-weight: 600;
+            transition: all 0.22s;
         }
         .language-tab.active {
-            background-color: #007acc;
-            color: white;
+            background: linear-gradient(90deg,#43effd 30%, #13e7c7 100%);
+            color: #113366;
+            border-color: #43effd;
+            font-weight: 700;
         }
-        .split-view { display: flex; gap: 20px; flex-wrap: wrap; }
-        .code-editor, .output-panel { flex: 1; min-width: 500px; }
+        .split-view {
+            display: flex;
+            gap: 24px;
+            flex-wrap: wrap;
+        }
+        .code-editor, .output-panel {
+            flex: 1;
+            min-width: 360px;
+        }
         #editor {
             height: 400px;
         }
-        textarea, pre, input {
-            width: 100%;
-            background-color: #252526;
-            color: #dcdcdc;
-            font-family: 'Source Code Pro', monospace;
-            font-size: 14px;
-            border: none;
-            border-radius: 5px;
-            padding: 10px;
-            margin-top: 10px;
+        .button-group {
+            margin-top: 22px;
+            display: flex;
+            gap: 12px;
         }
-        .button-group { margin-top: 15px; display: flex; gap: 10px; }
         .button {
-            padding: 10px 20px;
-            background-color: #0e639c;
-            color: white;
+            padding: 11px 22px;
+            background: linear-gradient(90deg,#16edd7 40%,#4874fe 100%);
+            color: #fff;
             border: none;
-            border-radius: 5px;
+            border-radius: 7px;
             cursor: pointer;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+        .button:hover {
+            background: linear-gradient(90deg,#58e1fe 30%,#1be5c3 100%);
+            color: #133944;
         }
         .execution-output {
-            background-color: #000;
-            color: #0f0;
+            background-color: #101329;
+            color: #0fcaca;
             padding: 15px;
-            border-radius: 5px;
-            box-shadow: inset 0 0 10px #0f0;
-            white-space: pre-wrap;
+            border-radius: 9px;
+            box-shadow: 0 0 15px #4bffe367;
+            margin-top: 12px;
         }
-        .ai-float-chat {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            width: 300px;
-            background: #1e1e1e;
-            border: 1px solid #ccc;
-            border-radius: 8px;
-            padding: 10px;
-            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+        pre {
+            font-family: 'Source Code Pro', monospace;
+            border-radius: 6px;
+            background: #1a2240;
+            padding: 13px;
+            color: #bbfcff;
         }
-        .ai-float-chat textarea {
-            height: 80px;
+        @media (max-width: 900px) {
+            .split-view { flex-direction: column; }
         }
-        .ai-float-chat button {
-            margin-top: 10px;
-            width: 100%;
-            background-color: #007acc;
-            border: none;
-            padding: 10px;
-            color: white;
-            border-radius: 5px;
+        @media (max-width: 600px) {
+            .welcome-content h1 { font-size: 2.2rem; }
+            .welcome-content p { font-size: 1.01rem; }
+            .container { margin: 13px 0; padding: 10px 4px; }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>AI Code Debugger</h1>
-            <p>Fix and run Python, Java & Arduino code with AI</p>
+
+<div class="welcome-screen" id="welcomeScreen">
+    <div class="floating-icons">
+        <i class="fas fa-bug floating-icon icon-1"></i>
+        <i class="fas fa-code floating-icon icon-2"></i>
+        <i class="fas fa-microchip floating-icon icon-3"></i>
+        <i class="fab fa-python floating-icon icon-4"></i>
+        <i class="fas fa-magic floating-icon icon-5"></i>
+    </div>
+    <div class="hero-content">
+        <h1>AI Code Debugger !! </h1>
+        <p>
+            An AI-powered platform that writes, debugs, and executes code.
+        </p>
+        <div class="hero-btn-group">
+            <button class="hero-btn" onclick="showDebugger()">Get Started for Free</button>
         </div>
-        <div class="language-tabs">
-            <div class="language-tab active" onclick="switchLanguage('python')"><i class="fab fa-python"></i> Python</div>
-            <div class="language-tab" onclick="switchLanguage('java')"><i class="fab fa-java"></i> Java</div>
-            <div class="language-tab" onclick="switchLanguage('arduino')"><i class="fas fa-microchip"></i> Arduino</div>
-        </div>
-        <form method="post">
-            <input type="hidden" name="language" id="languageInput" value="{{ language }}">
-            <input type="hidden" name="code" id="codeInput">
-            <div class="split-view">
-                <div class="code-editor">
-                    <h3>Editor</h3>
-                    <textarea id="editor">{{ code }}</textarea>
-                    {% if language == 'java' %}
-                    <input type="text" name="java_main_class" value="{{ java_main_class }}" placeholder="Main class name">
-                    {% endif %}
-                    {% if input_prompts %}
+    </div>
+</div>
+
+<div class="container" id="debuggerContainer">
+    <div class="header">
+        <h1>AI Code Debugger</h1>
+        <p>Fix and run Python, Java & Arduino code with AI</p>
+    </div>
+    <div class="language-tabs">
+        <div class="language-tab active" onclick="switchLanguage('python')"><i class="fab fa-python"></i> Python</div>
+        <div class="language-tab" onclick="switchLanguage('java')"><i class="fab fa-java"></i> Java</div>
+        <div class="language-tab" onclick="switchLanguage('arduino')"><i class="fas fa-microchip"></i> Arduino</div>
+    </div>
+    <form method="post">
+        <input type="hidden" name="language" id="languageInput" value="{{ language }}" />
+        <input type="hidden" name="code" id="codeInput" />
+        <div class="split-view">
+            <div class="code-editor">
+                <h3>Editor</h3>
+                <textarea id="editor">{{ code }}</textarea>
+                {% if language == 'java' %}
+                    <input type="text" name="java_main_class" value="{{ java_main_class }}" placeholder="Main class name" />
+                {% endif %}
+                {% if input_prompts %}
                     <div>
                         {% for prompt in input_prompts %}
-                        <input type="text" name="test_input_{{ loop.index0 }}" value="{{ test_inputs[loop.index0] if test_inputs and loop.index0 < test_inputs|length else '' }}" placeholder="{{ prompt }}">
+                            <input
+                                type="text"
+                                name="test_input_{{ loop.index0 }}"
+                                value="{{ test_inputs[loop.index0] if test_inputs and loop.index0 < test_inputs|length else '' }}"
+                                placeholder="{{ prompt }}"
+                            />
                         {% endfor %}
                     </div>
-                    {% endif %}
-                    <div class="button-group">
-                        <button class="button" type="submit">Debug Code</button>
-                        <a href="/download" class="button">Download</a>
-                    </div>
-                </div>
-                <div class="output-panel">
-                    {% if result %}
-                        <h3>Fixed Code</h3>
-                        <pre>{{ result }}</pre>
-                    {% endif %}
-                    {% if explanation %}
-                        <h3>Explanation</h3>
-                        <pre>{{ explanation }}</pre>
-                    {% endif %}
-                    {% if output %}
-                        <h3>Execution Output</h3>
-                        <div class="execution-output">{{ output }}</div>
-                    {% endif %}
+                {% endif %}
+                <div class="button-group">
+                    <button class="button" type="submit">Debug Code</button>
+                    <a href="/download" class="button">Download</a>
                 </div>
             </div>
-        </form>
-        {% if chat_response %}
-        <div class="output-panel">
-            <h3>AI Response</h3>
-            <pre>{{ chat_response }}</pre>
+            <div class="output-panel">
+                {% if result %}
+                    <h3>Fixed Code</h3>
+                    <pre>{{ result }}</pre>
+                {% endif %}
+                {% if explanation %}
+                    <h3>Explanation</h3>
+                    <pre>{{ explanation }}</pre>
+                {% endif %}
+                {% if output %}
+                    <h3>Execution Output</h3>
+                    <div class="execution-output">{{ output }}</div>
+                {% endif %}
+            </div>
         </div>
-        {% endif %}
-        <form class="ai-float-chat" method="post">
-            <textarea name="chat_prompt" placeholder="Ask anything about code...">{{ chat_prompt }}</textarea>
-            <button type="submit" name="chat_submit">Ask AI</button>
-        </form>
+    </form>
+
+    {% if chat_response %}
+    <div class="output-panel">
+        <h3>AI Response</h3>
+        <pre>{{ chat_response }}</pre>
     </div>
-    <script>
-        const languageMode = {
-            "python": "python",
-            "java": "text/x-java",
-            "arduino": "text/x-c++src"
-        };
+    {% endif %}
+    <form class="ai-float-chat" method="post">
+        <textarea name="chat_prompt" placeholder="Ask anything about code...">{{ chat_prompt }}</textarea>
+        <button type="submit" name="chat_submit">Ask AI</button>
+    </form>
+</div>
 
-        const editor = CodeMirror.fromTextArea(document.getElementById("editor"), {
-            lineNumbers: true,
-            mode: languageMode["{{ language }}"],
-            theme: "default",
-            matchBrackets: true,
-            autoCloseBrackets: true
-        });
+<script>
+    const languageMode = {
+        python: "python",
+        java: "text/x-java",
+        arduino: "text/x-c++src",
+    };
 
-        document.querySelector("form").addEventListener("submit", function () {
-            document.getElementById("codeInput").value = editor.getValue();
-        });
+    const editor = CodeMirror.fromTextArea(document.getElementById("editor"), {
+        lineNumbers: true,
+        mode: languageMode["{{ language }}"],
+        theme: "default",
+        matchBrackets: true,
+        autoCloseBrackets: true,
+    });
 
-        function switchLanguage(lang) {
-            document.querySelectorAll('.language-tab').forEach(tab => tab.classList.remove('active'));
-            document.querySelector(`.language-tab[onclick*="${lang}"]`).classList.add('active');
-            document.getElementById('languageInput').value = lang;
-            editor.setOption("mode", languageMode[lang]);
-        }
+    document.querySelector("form").addEventListener("submit", function () {
+        document.getElementById("codeInput").value = editor.getValue();
+    });
 
-        window.onload = function () {
-            switchLanguage("{{ language }}");
-        };
-    </script>
+    function switchLanguage(lang) {
+        document.querySelectorAll(".language-tab").forEach((tab) => tab.classList.remove("active"));
+        document.querySelector(`.language-tab[onclick*="${lang}"]`).classList.add("active");
+        document.getElementById("languageInput").value = lang;
+        editor.setOption("mode", languageMode[lang]);
+    }
+
+    function showDebugger() {
+        document.getElementById("welcomeScreen").style.display = "none";
+        document.getElementById("debuggerContainer").style.display = "block";
+    }
+
+    window.onload = function () {
+        switchLanguage("{{ language }}");
+    };
+</script>
 </body>
 </html>
 """
+
+
 
 # Global state
 fixed_code_result = ""
