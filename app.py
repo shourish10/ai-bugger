@@ -1,5 +1,6 @@
-from flask import Flask, render_template, request, render_template_string, make_response, send_file
+from flask import Flask, render_template_string, request, make_response, jsonify
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 import os
 from dotenv import load_dotenv
 import io
@@ -7,13 +8,20 @@ import sys
 import re
 import subprocess
 import tempfile
+import time
+import shutil
 
 load_dotenv()
 app = Flask(__name__)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-# HTML template omitted for brevity (you already have it)
-# HTML Template embedded
+def _js_string_filter(s):
+    if s is None:
+        return ''
+    return s.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"').replace('\n', '\\n').replace('\r', '')
+
+app.jinja_env.filters['js_string'] = _js_string_filter
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -27,13 +35,17 @@ HTML_TEMPLATE = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/codemirror.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/python/python.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/clike/clike.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/verilog/verilog.min.js"></script>
     <style>
+        /* General Body and Container Styles */
         body {
             margin: 0;
             font-family: 'Fira Sans', sans-serif;
             background: #15151e;
             color: #fff;
+            background-repeat: repeat;
         }
+
         /* ------------- WELCOME PAGE ------------ */
         .welcome-screen {
             display: {{ 'none' if code or result or explanation or output else 'flex' }};
@@ -55,15 +67,15 @@ HTML_TEMPLATE = """
         .hero-content h1 {
             font-size: 5.9rem;
             font-weight: 900;
-            color: #000000; /* Changed to black as requested */
+            color: #000000;
             letter-spacing: 0.02em;
             margin-bottom: 0.6em;
             text-shadow: 0 6px 32px #2637ff40, 0 1px 2px #16edd7, 0 8px 40px #3986fd20;
             font-family: 'Fira Sans', sans-serif;
             text-align: center;
-            white-space: nowrap; /* Keep text on one line */
-            overflow: hidden; /* Hide overflowing text */
-            border-right: .15em solid orange; /* The typing cursor */
+            white-space: nowrap;
+            overflow: hidden;
+            border-right: .15em solid orange;
             animation: 
               typing 3.5s steps(40, end),
               blink-caret .75s step-end infinite;
@@ -217,14 +229,13 @@ HTML_TEMPLATE = """
             font-weight: 900;
             color: #FFFFFF;
             margin-bottom: 8px;
-            /* --- MODIFIED TEXT SHADOW AND ADDED TYPING ANIMATION --- */
-            text-shadow: 0 3px 15px #54dbff50, 0 1px 5px #0ffbe050; /* Reduced shadow */
+            text-shadow: 0 3px 15px #54dbff50, 0 1px 5px #0ffbe050;
             font-family: 'Fira Sans', sans-serif;
             letter-spacing: 0.03em;
             text-align: center;
-            white-space: nowrap; /* Keep text on one line */
-            overflow: hidden; /* Hide overflowing text */
-            border-right: .15em solid orange; /* The typing cursor */
+            white-space: nowrap;
+            overflow: hidden;
+            border-right: .15em solid orange;
             animation: 
               typing 3.5s steps(40, end),
               blink-caret .75s step-end infinite;
@@ -239,6 +250,7 @@ HTML_TEMPLATE = """
             gap: 18px;
             margin: 20px 0;
             justify-content: center;
+            flex-wrap: wrap; /* Allow tabs to wrap on smaller screens */
         }
         .language-tab {
             padding: 8px 26px;
@@ -250,6 +262,9 @@ HTML_TEMPLATE = """
             cursor: pointer;
             font-weight: 600;
             transition: all 0.22s;
+            display: flex; /* Make icons and text align */
+            align-items: center;
+            gap: 8px; /* Space between icon and text */
         }
         .language-tab.active {
             background: linear-gradient(90deg,#43effd 30%, #13e7c7 100%);
@@ -265,14 +280,43 @@ HTML_TEMPLATE = """
         .code-editor, .output-panel {
             flex: 1;
             min-width: 360px;
+            background: #1a2240; /* Consistent background for editor/output panels */
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3); /* Enhanced shadow */
         }
         #editor {
             height: 400px;
+            border: 1px solid #334466; /* Border for editor */
+            border-radius: 8px; /* Rounded corners for editor */
         }
+
+        /* Codemirror overrides for theme */
+        .CodeMirror {
+            border: 1px solid #334466;
+            border-radius: 8px;
+            background: #101329; /* Darker background for code editor */
+            color: #bbfcff;
+            font-family: 'Source Code Pro', monospace;
+            font-size: 1rem;
+        }
+        .CodeMirror-gutters {
+            background: #101329;
+            border-right: 1px solid #334466;
+        }
+        .CodeMirror-linenumber {
+            color: #6a7c99;
+        }
+        .CodeMirror-cursor {
+            border-left: 1px solid #fff;
+        }
+        /* End Codemirror overrides */
+
         .button-group {
             margin-top: 22px;
             display: flex;
             gap: 12px;
+            justify-content: flex-end; /* Align buttons to the right */
         }
         .button {
             padding: 11px 22px;
@@ -283,11 +327,35 @@ HTML_TEMPLATE = """
             cursor: pointer;
             font-size: 1rem;
             font-weight: 600;
+            transition: all 0.3s ease; /* Smooth transition for buttons */
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2); /* Button shadow */
         }
         .button:hover {
             background: linear-gradient(90deg,#58e1fe 30%,#1be5c3 100%);
             color: #133944;
+            transform: translateY(-2px); /* Slight lift on hover */
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
         }
+        .button.loading {
+            background: linear-gradient(90deg, #666 40%, #999 100%); /* Grey out when loading */
+            cursor: not-allowed;
+        }
+        .button.loading .spinner {
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-top: 2px solid #fff;
+            border-radius: 50%;
+            width: 12px;
+            height: 12px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-left: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
         .execution-output {
             background-color: #101329;
             color: #0fcaca;
@@ -295,22 +363,279 @@ HTML_TEMPLATE = """
             border-radius: 9px;
             box-shadow: 0 0 15px #4bffe367;
             margin-top: 12px;
+            font-family: 'Source Code Pro', monospace;
+            white-space: pre-wrap; /* Ensure wrapping here too */
+            word-wrap: break-word;
+            overflow-x: auto;
         }
         pre {
             font-family: 'Source Code Pro', monospace;
             border-radius: 6px;
-            background: #1a2240;
+            background: #101329; /* Darker background for pre tags */
             padding: 13px;
             color: #bbfcff;
+            white-space: pre-wrap;   /* Fix: Allows wrapping of long lines */
+            word-wrap: break-word;   /* Fix: Breaks words if necessary */
+            overflow-x: auto;        /* Fix: Adds horizontal scroll if lines are still too long */
+            box-shadow: inset 0 0 8px rgba(0,255,255,0.1); /* Subtle inner glow */
         }
+
+        /* General Input Field Styling */
+        input[type="text"] {
+            display: block;
+            width: calc(100% - 24px); /* Account for padding */
+            padding: 10px 12px;
+            margin-top: 10px;
+            border-radius: 8px;
+            border: 1px solid #334466;
+            background: #1e253a;
+            color: #e0f2f7;
+            font-size: 0.95rem;
+            font-family: 'Fira Sans', sans-serif;
+            outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        input[type="text"]::placeholder {
+            color: #9bb7c7;
+        }
+
+        input[type="text"]:focus {
+            border-color: #43effd;
+            box-shadow: 0 0 0 2px rgba(67, 239, 253, 0.3);
+        }
+
+        /* Headings within panels */
+        .code-editor h3, .output-panel h3 {
+            color: #fff;
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-weight: 700;
+            font-size: 1.4rem;
+            border-bottom: 2px solid #334466; /* Underline effect */
+            padding-bottom: 8px;
+        }
+        
+        /* Responsive adjustments */
         @media (max-width: 900px) {
             .split-view { flex-direction: column; }
+            .code-editor, .output-panel { min-width: unset; width: 100%; }
         }
         @media (max-width: 600px) {
             .welcome-content h1 { font-size: 2.2rem; }
             .welcome-content p { font-size: 1.01rem; }
             .container { margin: 13px 0; padding: 10px 4px; }
+            .language-tabs { flex-direction: column; align-items: center; } /* Stack tabs vertically */
         }
+
+        /* Custom scrollbar styles (Webkit browsers) */
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #1a2240;
+            border-radius: 10px;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #43effd;
+            border-radius: 10px;
+            border: 2px solid #1a2240;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #13e7c7;
+        }
+
+        /* Chatbot Styles */
+        .chatbot-container {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            width: 350px;
+            height: 450px;
+            background: #202745;
+            border-radius: 15px;
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            z-index: 1000;
+            transform: translateY(100%); /* Start off-screen */
+            opacity: 0;
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+        }
+        .chatbot-container.active {
+            transform: translateY(0);
+            opacity: 1;
+        }
+        .chatbot-header {
+            background: linear-gradient(90deg, #43effd 30%, #13e7c7 100%);
+            color: #113366;
+            padding: 15px;
+            font-size: 1.2rem;
+            font-weight: 700;
+            border-top-left-radius: 15px;
+            border-top-right-radius: 15px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .chatbot-header i {
+            font-size: 1.5rem;
+        }
+        .chatbot-header .close-btn {
+            background: none;
+            border: none;
+            color: #113366;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 0 5px;
+            transition: transform 0.2s;
+        }
+        .chatbot-header .close-btn:hover {
+            transform: rotate(90deg);
+        }
+        .chatbot-messages {
+            flex-grow: 1;
+            padding: 15px;
+            overflow-y: auto;
+            background-color: #1a2240;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .message {
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 15px;
+            font-size: 0.95rem;
+            line-height: 1.4;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #007bff;
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 5px;
+        }
+        .bot-message {
+            background-color: #334466;
+            color: #e0f2f7;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+        }
+        .chatbot-input {
+            display: flex;
+            padding: 10px 15px;
+            border-top: 1px solid #334466;
+            background-color: #202745;
+        }
+        .chatbot-input input {
+            flex-grow: 1;
+            border: 1px solid #334466;
+            border-radius: 20px;
+            padding: 10px 15px;
+            background-color: #1e253a;
+            color: #e0f2f7;
+            font-size: 0.95rem;
+            margin-top: 0; /* Override default input margin */
+            margin-right: 10px;
+        }
+        .chatbot-input input:focus {
+            border-color: #43effd;
+            box-shadow: 0 0 0 2px rgba(67, 239, 253, 0.3);
+        }
+        .chatbot-input button {
+            background: linear-gradient(90deg,#16edd7 40%,#4874fe 100%);
+            border: none;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.2s;
+            box-shadow: 2px 2px 10px rgba(0,0,0,0.3);
+            color: white; /* Icon color */
+            font-size: 1rem;
+            padding: 0; /* Remove default button padding */
+            margin-top: 0; /* Override default button margin */
+        }
+        .chatbot-input button:hover {
+            background: linear-gradient(90deg,#58e1fe 30%,#1be5c3 100%);
+            transform: translateY(-1px);
+        }
+        .chatbot-toggle-button {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: linear-gradient(90deg,#43effd 30%, #13e7c7 100%);
+            color: #113366;
+            border: none;
+            border-radius: 50%;
+            width: 60px;
+            height: 60px;
+            font-size: 1.8rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+            z-index: 1001; /* Above the chatbot container when hidden */
+            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+        }
+        .chatbot-toggle-button.hidden {
+            opacity: 0;
+            pointer-events: none; /* Make it unclickable when hidden */
+        }
+        .chatbot-toggle-button i {
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        .typing-indicator {
+            display: flex;
+            gap: 4px;
+            padding: 10px 15px;
+            border-radius: 15px;
+            background-color: #334466;
+            color: #e0f2f7;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+            font-size: 0.95rem;
+        }
+        .typing-indicator span {
+            animation: blink 1s infinite;
+        }
+        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink {
+            0%, 100% { opacity: 0.2; }
+            50% { opacity: 1; }
+        }
+        /* Responsive Chatbot */
+        @media (max-width: 400px) {
+            .chatbot-container {
+                width: 90%;
+                right: 5%;
+                left: 5%;
+                height: 70vh; /* Adjust height for smaller screens */
+                bottom: 10px;
+            }
+            .chatbot-toggle-button {
+                bottom: 10px;
+                right: 10px;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -337,12 +662,14 @@ HTML_TEMPLATE = """
 <div class="container" id="debuggerContainer">
     <div class="header">
         <h1>AI Code Debugger</h1>
-        <p>Fix and run Python, Java & Arduino code with AI</p>
+        <p>Fix and run Python, Java, Arduino, Verilog & SystemVerilog code with AI</p>
     </div>
     <div class="language-tabs">
-        <div class="language-tab active" onclick="switchLanguage('python')"><i class="fab fa-python"></i> Python</div>
+        <div class="language-tab" onclick="switchLanguage('python')"><i class="fab fa-python"></i> Python</div>
         <div class="language-tab" onclick="switchLanguage('java')"><i class="fab fa-java"></i> Java</div>
         <div class="language-tab" onclick="switchLanguage('arduino')"><i class="fas fa-microchip"></i> Arduino</div>
+        <div class="language-tab" onclick="switchLanguage('verilog')"><i class="fas fa-microchip"></i> Verilog</div>
+        <div class="language-tab" onclick="switchLanguage('systemverilog')"><i class="fas fa-microchip"></i> SystemVerilog</div>
     </div>
     <form method="post">
         <input type="hidden" name="language" id="languageInput" value="{{ language }}" />
@@ -351,23 +678,21 @@ HTML_TEMPLATE = """
             <div class="code-editor">
                 <h3>Editor</h3>
                 <textarea id="editor">{{ code }}</textarea>
-                {% if language == 'java' %}
-                    <input type="text" name="java_main_class" value="{{ java_main_class }}" placeholder="Main class name" />
-                {% endif %}
-                {% if input_prompts %}
-                    <div>
-                        {% for prompt in input_prompts %}
-                            <input
-                                type="text"
-                                name="test_input_{{ loop.index0 }}"
-                                value="{{ test_inputs[loop.index0] if test_inputs and loop.index0 < test_inputs|length else '' }}"
-                                placeholder="{{ prompt }}"
-                            />
-                        {% endfor %}
-                    </div>
-                {% endif %}
+                <div id="javaMainClassContainer" style="display: none;">
+                    <input type="text" name="java_main_class" id="javaMainClassInput" value="{{ java_main_class }}" placeholder="Main class name" />
+                </div>
+                <div id="pythonInputPrompts" style="display: none;">
+                    {% for prompt in input_prompts %}
+                        <input
+                            type="text"
+                            name="test_input_{{ loop.index0 }}"
+                            value="{{ test_inputs[loop.index0] if test_inputs and loop.index0 < test_inputs|length else '' }}"
+                            placeholder="{{ prompt }}"
+                        />
+                    {% endfor %}
+                </div>
                 <div class="button-group">
-                    <button class="button" type="submit">Debug Code</button>
+                    <button class="button" type="submit" id="debugButton">Debug Code</button>
                     <a href="/download" class="button">Download</a>
                 </div>
             </div>
@@ -387,67 +712,292 @@ HTML_TEMPLATE = """
             </div>
         </div>
     </form>
-
-    {% if chat_response %}
-    <div class="output-panel">
-        <h3>AI Response</h3>
-        <pre>{{ chat_response }}</pre>
-    </div>
-    {% endif %}
-    <form class="ai-float-chat" method="post">
-        <textarea name="chat_prompt" placeholder="Ask anything about code...">{{ chat_prompt }}</textarea>
-        <button type="submit" name="chat_submit">Ask AI</button>
-    </form>
 </div>
+
+<div class="chatbot-container" id="chatbotContainer">
+    <div class="chatbot-header" id="chatbotHeader">
+        <i class="fas fa-robot"></i> AI Chatbot
+        <button class="close-btn" onclick="toggleChatbot()">&#x2715;</button>
+    </div>
+    <div class="chatbot-messages" id="chatbotMessages">
+        <div class="message bot-message">Hello! How can I assist you today?</div>
+        <div class="message bot-message">Try asking: 'What is the sum of 5 and 3?' or 'Tell me a fun fact about space.'</div>
+    </div>
+    <div class="chatbot-input">
+        <input type="text" id="chatInput" placeholder="Type your message..." />
+        <button id="sendChatBtn"><i class="fas fa-paper-plane"></i></button>
+    </div>
+</div>
+
+<button class="chatbot-toggle-button {{ 'hidden' if not code and not result and not explanation and not output else '' }}" id="chatbotToggleButton" onclick="toggleChatbot()">
+    <i class="fas fa-comment-dots"></i>
+</button>
 
 <script>
     const languageMode = {
         python: "python",
         java: "text/x-java",
         arduino: "text/x-c++src",
+        verilog: "verilog",
+        systemverilog: "verilog",
     };
 
-    const editor = CodeMirror.fromTextArea(document.getElementById("editor"), {
-        lineNumbers: true,
-        mode: languageMode["{{ language }}"],
-        theme: "default",
-        matchBrackets: true,
-        autoCloseBrackets: true,
-    });
+    let editorInstance;
+    let currentLanguage;
+    let debugForm;
+    let debugButton;
+    let javaMainClassContainer;
+    let pythonInputPromptsContainer;
+    let chatbotContainer;
+    let chatbotToggleButton;
+    let chatInput;
+    let sendChatBtn;
+    let chatbotMessages;
+    let debuggerContainer;
+    let languageTabs;
 
-    document.querySelector("form").addEventListener("submit", function () {
-        document.getElementById("codeInput").value = editor.getValue();
-    });
+    function initializeElements() {
+        debugForm = document.querySelector("form");
+        debugButton = document.getElementById("debugButton");
+        javaMainClassContainer = document.getElementById('javaMainClassContainer');
+        pythonInputPromptsContainer = document.getElementById('pythonInputPrompts');
+        chatbotContainer = document.getElementById('chatbotContainer');
+        chatbotToggleButton = document.getElementById('chatbotToggleButton');
+        chatInput = document.getElementById('chatInput');
+        sendChatBtn = document.getElementById('sendChatBtn');
+        chatbotMessages = document.getElementById('chatbotMessages');
+        debuggerContainer = document.getElementById('debuggerContainer');
+        languageTabs = document.querySelectorAll(".language-tab");
+    }
+
+    function initializeCodeMirror(initialLanguage, initialCode) {
+        console.log("Initializing CodeMirror with mode:", initialLanguage);
+        const editorTextArea = document.getElementById("editor");
+        if (editorTextArea) {
+            editorInstance = CodeMirror.fromTextArea(editorTextArea, {
+                lineNumbers: true,
+                mode: languageMode[initialLanguage],
+                theme: "default",
+                matchBrackets: true,
+                autoCloseBrackets: true,
+                value: initialCode
+            });
+            editorInstance.refresh();
+            console.log("CodeMirror instance created successfully.");
+        } else {
+            console.error("CRITICAL ERROR: CodeMirror textarea with ID 'editor' not found. Cannot initialize editor.");
+        }
+    }
 
     function switchLanguage(lang) {
-        document.querySelectorAll(".language-tab").forEach((tab) => tab.classList.remove("active"));
-        document.querySelector(`.language-tab[onclick*="${lang}"]`).classList.add("active");
+        console.log("Attempting to switch language to:", lang);
+        
+        languageTabs.forEach((tab) => tab.classList.remove("active"));
+        const targetTab = document.querySelector(`.language-tab[onclick*="${lang}"]`);
+        if (targetTab) {
+            targetTab.classList.add("active");
+            console.log(`Active tab class added for '${lang}'.`);
+        }
+        
         document.getElementById("languageInput").value = lang;
-        editor.setOption("mode", languageMode[lang]);
+        currentLanguage = lang;
+
+        if (editorInstance) {
+            editorInstance.setOption("mode", languageMode[lang]);
+            editorInstance.refresh();
+            console.log("CodeMirror mode successfully set to:", languageMode[lang]);
+        } else {
+            console.warn("CodeMirror instance is not available. Cannot set mode.");
+        }
+
+        if (javaMainClassContainer) { 
+            javaMainClassContainer.style.display = (lang === 'java') ? 'block' : 'none';
+        }
+        if (pythonInputPromptsContainer) { 
+            pythonInputPromptsContainer.style.display = (lang === 'python') ? 'block' : 'none';
+        }
     }
 
     function showDebugger() {
-        document.getElementById("welcomeScreen").style.display = "none";
-        document.getElementById("debuggerContainer").style.display = "block";
+        console.log("showDebugger() called.");
+        const welcomeScreen = document.getElementById("welcomeScreen");
+        if (welcomeScreen) welcomeScreen.style.display = "none";
+        if (debuggerContainer) debuggerContainer.style.display = "block";
+        updateChatbotVisibility(true);
     }
 
-    window.onload = function () {
-        switchLanguage("{{ language }}");
-    };
+    function updateChatbotVisibility(visible) {
+        if (chatbotToggleButton) {
+            if (visible) {
+                chatbotToggleButton.classList.remove('hidden');
+                chatbotToggleButton.style.display = 'flex';
+            } else {
+                chatbotToggleButton.classList.add('hidden');
+                chatbotToggleButton.style.display = 'none';
+            }
+        }
+    }
+
+    function toggleChatbot() {
+        console.log("toggleChatbot() called.");
+        if (chatbotContainer && chatbotToggleButton) {
+            chatbotContainer.classList.toggle('active');
+            chatbotToggleButton.classList.toggle('hidden');
+            if (chatbotContainer.classList.contains('active')) {
+                if (chatbotMessages) {
+                    chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
+                }
+                if (chatInput) {
+                    chatInput.focus();
+                }
+                console.log("Chatbot opened.");
+            } else {
+                console.log("Chatbot closed.");
+            }
+        } else {
+            console.error("Chatbot elements not found.");
+        }
+    }
+
+    async function sendMessage() {
+        if (!chatInput || !chatbotMessages || !sendChatBtn) {
+            console.error("Chatbot input elements not found.");
+            return;
+        }
+        const userMessage = chatInput.value.trim();
+        if (userMessage === '') return;
+
+        const userMessageDiv = document.createElement('div');
+        userMessageDiv.classList.add('message', 'user-message');
+        userMessageDiv.textContent = userMessage;
+        chatbotMessages.appendChild(userMessageDiv);
+        chatInput.value = '';
+        chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
+
+        const typingIndicatorDiv = document.createElement('div');
+        typingIndicatorDiv.classList.add('typing-indicator', 'bot-message');
+        typingIndicatorDiv.innerHTML = '<span>.</span><span>.</span><span>.</span>';
+        chatbotMessages.appendChild(typingIndicatorDiv);
+        chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
+        sendChatBtn.disabled = true;
+
+        try {
+            const response = await fetch('/send_chat_message', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ message: userMessage }),
+            });
+
+            if (!response.ok) {
+                if (response.status === 429) {
+                    throw new Error('Quota exceeded. Please wait a moment and try again.');
+                }
+                throw new Error(`HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            
+            if (chatbotMessages.contains(typingIndicatorDiv)) {
+                chatbotMessages.removeChild(typingIndicatorDiv);
+            }
+
+            const botMessageDiv = document.createElement('div');
+            botMessageDiv.classList.add('message', 'bot-message');
+            botMessageDiv.textContent = data.response;
+            chatbotMessages.appendChild(botMessageDiv);
+            chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
+
+        } catch (error) {
+            console.error('Error sending message:', error);
+            if (chatbotMessages.contains(typingIndicatorDiv)) {
+                 chatbotMessages.removeChild(typingIndicatorDiv);
+            }
+            const errorMessageDiv = document.createElement('div');
+            errorMessageDiv.classList.add('message', 'bot-message');
+            errorMessageDiv.textContent = `Error: ${error.message || 'Could not get a response. Please try again.'}`;
+            chatbotMessages.appendChild(errorMessageDiv);
+            chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
+        } finally {
+            sendChatBtn.disabled = false;
+            chatInput.focus();
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        console.log("DOMContentLoaded fired.");
+        initializeElements();
+
+        const initialLanguage = "{{ language }}";
+        const initialCode = `{{ code | js_string }}`; 
+        
+        initializeCodeMirror(initialLanguage, initialCode);
+        switchLanguage(initialLanguage);
+
+        if (debugForm) {
+            debugForm.addEventListener("submit", function (event) {
+                if (debugButton) {
+                    debugButton.classList.add('loading');
+                    debugButton.innerHTML = 'Processing... <span class="spinner"></span>';
+                    debugButton.disabled = true;
+                }
+                if (editorInstance) {
+                    document.getElementById("codeInput").value = editorInstance.getValue();
+                }
+            });
+        }
+        
+        // Add event listeners for language tabs
+        if (languageTabs) {
+             languageTabs.forEach(tab => {
+                const lang = tab.getAttribute('onclick').match(/'([^']+)'/)[1];
+                tab.addEventListener('click', () => switchLanguage(lang));
+            });
+        }
+
+        // Add event listeners for chatbot
+        if (sendChatBtn && chatInput) {
+            sendChatBtn.addEventListener('click', sendMessage);
+            chatInput.addEventListener('keypress', function (e) {
+                if (e.key === 'Enter') {
+                    sendMessage();
+                }
+            });
+        }
+
+        // Reset debug button state
+        if (debugButton) {
+            debugButton.classList.remove('loading');
+            debugButton.innerHTML = 'Debug Code';
+            debugButton.disabled = false;
+        }
+    });
+
 </script>
 </body>
 </html>
 """
 
-
+# The Python code below is identical to our last conversation, but I'll include it for completeness.
 
 # Global state
 fixed_code_result = ""
 explanation_text = ""
-chat_response = ""
+
+def _gemini_api_call_with_retries(func, *args, max_retries=5, initial_delay=1, **kwargs):
+    delay = initial_delay
+    for i in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            print(f"Attempt {i+1}/{max_retries} failed: {e}. Retrying in {delay:.2f} seconds...")
+            time.sleep(delay)
+            delay *= 2
+    raise Exception(f"Failed after {max_retries} retries.")
 
 def preprocess_code(code):
-    code = code.replace("```python", "").replace("```java", "").replace("```arduino", "").replace("```", "")
+    code = code.replace("```python", "").replace("```java", "").replace("```arduino", "").replace("```verilog", "").replace("```systemverilog", "").replace("```", "")
     code = code.replace("\t", "    ")
     code = re.sub(r'[^\x00-\x7F]+', '', code)
     code = re.sub(r'^\s*\.\.\..*$', '', code, flags=re.MULTILINE)
@@ -458,7 +1008,7 @@ def get_input_prompts(code):
     matches = list(re.finditer(r'input\s*\((.*?)\)', code))
     for match in matches:
         try:
-            prompt = match.group(1).strip('"\'') or "Enter value"
+            prompt = match.group(1).strip().strip('"\'') or "Enter value"
         except:
             prompt = "Enter value"
         prompts.append(prompt)
@@ -471,9 +1021,15 @@ def requires_test_input(code):
 def fix_code_with_gemini(code, language):
     global fixed_code_result, explanation_text
     try:
-        model = genai.GenerativeModel("models/gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-1.5-flash",
+                                      safety_settings={
+                                          HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                                          HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                                          HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                                          HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                                      })
         chat = model.start_chat()
-
+        prompt = ""
         if language == "java":
             class_match = re.search(r'public\s+class\s+(\w+)', code)
             main_class = class_match.group(1) if class_match else "Main"
@@ -481,45 +1037,69 @@ def fix_code_with_gemini(code, language):
 {code}
 Requirements:
 1. Include main class '{main_class}'
-2. Add imports and fix syntax
+2. Add necessary imports and fix syntax errors.
+3. Ensure the code is runnable.
 Format:
 <corrected_code>
 ---EXPLANATION---
 <explanation>"""
-
         elif language == "arduino":
             prompt = f"""Fix this Arduino code:
 {code}
 Requirements:
-1. Ensure setup() and loop() are present
-2. Add comments and fix any syntax issues
+1. Ensure setup() and loop() functions are correctly defined and present.
+2. Fix any syntax errors, logical issues, and add necessary includes (e.g., #include <Arduino.h>).
+3. Provide clear and concise comments where necessary.
 Format:
 <corrected_code>
 ---EXPLANATION---
 <explanation>"""
-
+        elif language == "verilog":
+            prompt = f"""Fix this Verilog code:
+{code}
+Requirements:
+1. Correct syntax errors and logical issues.
+2. Ensure proper module definition and port declarations.
+3. Provide clear and concise comments where necessary.
+4. If it's a testbench, ensure it instantiates the DUT correctly and includes initial/always blocks for simulation.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        elif language == "systemverilog":
+            prompt = f"""Fix this SystemVerilog code:
+{code}
+Requirements:
+1. Correct syntax errors and logical issues.
+2. Ensure proper module/interface/class definition and port/variable declarations.
+3. Provide clear and concise comments where necessary.
+4. If it's a testbench, ensure it instantiates the DUT correctly and includes initial/always blocks for simulation.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
         else:
             prompt = f"""Fix this Python code:
 {code}
 Requirements:
 1. Correct syntax or logical errors.
-2. Do not convert string to int unless necessary.
-3. Preserve operations like str * int.
+2. Do not convert string to int unless explicitly necessary for the logic.
+3. Preserve operations like string multiplication (e.g., 'a' * 3).
+4. Ensure the code is runnable and produces expected output if inputs are provided.
 Format:
 <corrected_code>
 ---EXPLANATION---
 <explanation>"""
-
-        response = chat.send_message(prompt)
+        response = _gemini_api_call_with_retries(chat.send_message, prompt)
         full = response.text.strip()
         if '---EXPLANATION---' in full:
             fixed_code_result, explanation_text = map(str.strip, full.split('---EXPLANATION---', 1))
         else:
             fixed_code_result = full
-            explanation_text = "Explanation not provided."
+            explanation_text = "Explanation not provided by AI."
     except Exception as e:
-        fixed_code_result = f"\u274c Error: {str(e)}"
-        explanation_text = ""
+        fixed_code_result = f"\u274c Error contacting AI: {str(e)}"
+        explanation_text = "Could not generate explanation due to an error or repeated API failures."
 
 def execute_java_code(code, main_class):
     temp_dir = tempfile.mkdtemp()
@@ -527,10 +1107,12 @@ def execute_java_code(code, main_class):
     try:
         with open(file_path, 'w') as f:
             f.write(code)
-        compile = subprocess.run(['javac', file_path], cwd=temp_dir, capture_output=True, text=True)
+        compile_command = ['javac', file_path]
+        compile = subprocess.run(compile_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
         if compile.returncode != 0:
             return f"\u274c Compilation Error:\n{compile.stderr}"
-        run = subprocess.run(['java', '-cp', temp_dir, main_class], capture_output=True, text=True, timeout=10)
+        run_command = ['java', '-cp', temp_dir, main_class]
+        run = subprocess.run(run_command, capture_output=True, text=True, timeout=10)
         if run.returncode != 0:
             return f"\u274c Runtime Error:\n{run.stderr}"
         return run.stdout or "\u2705 Ran successfully, no output."
@@ -540,29 +1122,62 @@ def execute_java_code(code, main_class):
         return f"\u274c Execution error: {str(e)}"
     finally:
         try:
-            for file in os.listdir(temp_dir):
-                os.unlink(os.path.join(temp_dir, file))
-            os.rmdir(temp_dir)
-        except: pass
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error during Java cleanup: {e}")
 
 def execute_arduino_code(code):
     temp_dir = tempfile.mkdtemp()
-    sketch = os.path.join(temp_dir, "sketch.ino")
+    sketch_dir = os.path.join(temp_dir, "sketch")
+    os.makedirs(sketch_dir)
+    sketch_file = os.path.join(sketch_dir, "sketch.ino")
     try:
-        with open(sketch, 'w') as f:
+        with open(sketch_file, 'w') as f:
             f.write(code)
-        compile = subprocess.run(['arduino-cli', 'compile', '--fqbn', 'arduino:avr:uno', temp_dir], capture_output=True, text=True)
+        compile_command = ['arduino-cli', 'compile', '--fqbn', 'arduino:avr:uno', sketch_dir]
+        compile = subprocess.run(compile_command, capture_output=True, text=True, timeout=30)
         if compile.returncode != 0:
-            return f"\u274c Compilation Error:\n{compile.stderr}"
-        return "\u2705 Arduino code compiled successfully"
+            return f"\u274c Compilation Error (Arduino CLI):\n{compile.stderr}"
+        return "\u2705 Arduino code compiled successfully."
+    except subprocess.TimeoutExpired:
+        return "\u274c Arduino compilation timed out."
+    except Exception as e:
+        return f"\u274c Error during Arduino compilation: {str(e)}"
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error during Arduino cleanup: {e}")
+
+def execute_verilog_code(code, language):
+    temp_dir = tempfile.mkdtemp()
+    file_extension = ".v" if language == "verilog" else ".sv"
+    file_path = os.path.join(temp_dir, f"design{file_extension}")
+    output_vvp = os.path.join(temp_dir, "a.out")
+    try:
+        with open(file_path, 'w') as f:
+            f.write(code)
+        compile_command = ['iverilog', '-o', output_vvp, file_path]
+        compile_result = subprocess.run(compile_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
+        if compile_result.returncode != 0:
+            return f"\u274c Compilation Error:\n{compile_result.stderr}"
+        if "initial begin" in code or "always_ff" in code or "always_comb" in code or "program " in code:
+            run_command = ['vvp', output_vvp]
+            run_result = subprocess.run(run_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
+            if run_result.returncode != 0:
+                return f"\u274c Runtime Error (Simulation):\n{run_result.stderr}"
+            return run_result.stdout or "\u2705 Verilog/SystemVerilog compiled and ran successfully (no output to display)."
+        else:
+            return "\u2705 Verilog/SystemVerilog compiled successfully (no testbench found for simulation)."
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
     except Exception as e:
         return f"\u274c Error: {str(e)}"
     finally:
         try:
-            for file in os.listdir(temp_dir):
-                os.unlink(os.path.join(temp_dir, file))
-            os.rmdir(temp_dir)
-        except: pass
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error during Verilog cleanup: {e}")
 
 def validate_and_execute_code(code, language, test_inputs=None, java_main_class=None):
     try:
@@ -572,7 +1187,10 @@ def validate_and_execute_code(code, language, test_inputs=None, java_main_class=
             if test_inputs and len(test_inputs) < len(inputs):
                 return f"\u274c Not enough test inputs (expected {len(inputs)})"
             for i, call in enumerate(inputs):
-                code = code.replace(call, repr(test_inputs[i]), 1)
+                if i < len(test_inputs):
+                    code = code.replace(call, repr(test_inputs[i]), 1)
+                else:
+                    code = code.replace(call, "''", 1)
             old_stdout = sys.stdout
             sys.stdout = captured = io.StringIO()
             try:
@@ -584,53 +1202,36 @@ def validate_and_execute_code(code, language, test_inputs=None, java_main_class=
             return execute_java_code(code, java_main_class)
         elif language == "arduino":
             return execute_arduino_code(code)
+        elif language in ["verilog", "systemverilog"]:
+            return execute_verilog_code(code, language)
     except Exception as e:
         return f"\u274c Execution failed: {str(e)}"
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    global fixed_code_result, explanation_text, chat_response
-
+    global fixed_code_result, explanation_text
     code = ""
     result = ""
     explanation = ""
     output = ""
-    chat_prompt = ""
-    chat_response = ""
     test_inputs = []
     input_prompts = []
     java_main_class = "Main"
     language = "python"
-
     if request.method == "POST":
         language = request.form.get("language", "python")
-        if "chat_submit" in request.form:
-            chat_prompt = request.form.get("chat_prompt", "")
-            try:
-                model = genai.GenerativeModel("models/gemini-1.5-flash")
-                response = model.generate_content(chat_prompt)
-                chat_response = response.text.strip()
-            except Exception as e:
-                chat_response = f"\u274c Error from AI: {str(e)}"
-        else:
-            code = request.form.get("code", "")
-            java_main_class = request.form.get("java_main_class", "Main")
-
-            if language == "python":
-                input_prompts = get_input_prompts(code)
-                if requires_test_input(code):
-                    test_inputs = []
-                    for i in range(len(input_prompts)):
-                        input_value = request.form.get(f"test_input_{i}", "")
-                        test_inputs.append(input_value)
-
-            # ✅ Fix and execute
-            fix_code_with_gemini(code, language)
-            result = fixed_code_result
-            explanation = explanation_text
-            output = validate_and_execute_code(result, language, test_inputs, java_main_class)
-
-
+        code = request.form.get("code", "")
+        java_main_class = request.form.get("java_main_class", "Main")
+        if language == "python":
+            input_prompts = get_input_prompts(code)
+            if requires_test_input(code):
+                for i in range(len(input_prompts)):
+                    input_value = request.form.get(f"test_input_{i}", "")
+                    test_inputs.append(input_value)
+        fix_code_with_gemini(code, language)
+        result = fixed_code_result
+        explanation = explanation_text
+        output = validate_and_execute_code(result, language, test_inputs, java_main_class)
     return render_template_string(
         HTML_TEMPLATE,
         code=code,
@@ -641,8 +1242,6 @@ def index():
         input_prompts=input_prompts,
         test_inputs=test_inputs,
         java_main_class=java_main_class,
-        chat_prompt=chat_prompt,
-        chat_response=chat_response
     )
 
 @app.route("/download")
@@ -652,31 +1251,56 @@ def download():
         ext = ".ino"
     elif "public class" in fixed_code_result or "class " in fixed_code_result:
         ext = ".java"
+    elif "module " in fixed_code_result:
+        if "logic" in fixed_code_result or "interface" in fixed_code_result or "class " in fixed_code_result:
+            ext = ".sv"
+        else:
+            ext = ".v"
     else:
         ext = ".py"
-
     response = make_response(fixed_code_result)
     response.headers["Content-Disposition"] = f"attachment; filename=debugged_code{ext}"
     response.mimetype = "text/plain"
     return response
 
-if __name__ == "__main__":
+@app.route("/send_chat_message", methods=["POST"])
+def send_chat_message():
+    user_message = request.json.get("message")
+    if not user_message:
+        return jsonify({"response": "Error: No message provided."}), 400
     try:
-        java_check = subprocess.run(['java', '-version'], capture_output=True, text=True)
-        print("Java:", java_check.stderr.split('\n')[0])
+        model = genai.GenerativeModel("gemini-1.5-flash",
+                                      safety_settings={
+                                          HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                                          HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                                          HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                                          HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                                      })
+        chat_session = model.start_chat(history=[])
+        response = _gemini_api_call_with_retries(chat_session.send_message, user_message)
+        ai_response = response.text
+        return jsonify({"response": ai_response})
     except Exception as e:
-        print("\u26a0\ufe0f Java not found or not added to PATH")
+        print(f"Error in AI chat response: {e}")
+        return jsonify({"response": f"I'm sorry, I couldn't process that. Please try again. ({e})"}), 500
 
+if __name__ == "__main__":
+    print("Checking for external tools:")
     try:
-        arduino_check = subprocess.run(['arduino-cli', 'version'], capture_output=True, text=True)
-        print("Arduino CLI:", arduino_check.stdout.strip())
+        java_check = subprocess.run(['java', '-version'], capture_output=True, text=True, check=False)
+        print("Java:", java_check.stderr.split('\n')[0].strip() if java_check.stderr else "Not found.")
     except Exception as e:
-        print("\u26a0\ufe0f Arduino CLI not found or not added to PATH")
+        print(f"\u26a0\ufe0f Java not found or not added to PATH. Java execution will not work. Error: {e}")
+    try:
+        arduino_check = subprocess.run(['arduino-cli', 'version'], capture_output=True, text=True, check=False)
+        print("Arduino CLI:", arduino_check.stdout.strip().split('\n')[0].strip() if arduino_check.stdout else "Not found.")
+    except Exception as e:
+        print(f"\u26a0\ufe0f Arduino CLI not found or not added to PATH. Arduino compilation will not work. Error: {e}")
+    try:
+        iverilog_check = subprocess.run(['iverilog', '-v'], capture_output=True, text=True, check=False)
+        print("Icarus Verilog:", iverilog_check.stdout.strip().split('\n')[0].strip() if iverilog_check.stdout else "Not found.")
+    except Exception as e:
+        print(f"\u26a0\ufe0f Icarus Verilog (iverilog) not found or not added to PATH. Verilog/SystemVerilog compilation will not work. Error: {e}")
 
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-
-
-
-
+    app.run(host="0.0.0.0", port=port, debug=True)
