@@ -36,6 +36,9 @@ HTML_TEMPLATE = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/python/python.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/clike/clike.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/verilog/verilog.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/javascript/javascript.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/xml/xml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/css/css.min.js"></script>
     <style>
         /* General Body and Container Styles */
         body {
@@ -635,7 +638,6 @@ HTML_TEMPLATE = """
                 right: 10px;
             }
         }
-
     </style>
 </head>
 <body>
@@ -662,14 +664,21 @@ HTML_TEMPLATE = """
 <div class="container" id="debuggerContainer">
     <div class="header">
         <h1>AI Code Debugger</h1>
-        <p>Fix and run Python, Java, Arduino, Verilog & SystemVerilog code with AI</p>
+        <p>Fix and run Python, Java, Arduino, Verilog, SystemVerilog, JS, TS, HTML, and CSS code with AI</p>
     </div>
     <div class="language-tabs">
         <div class="language-tab" onclick="switchLanguage('python')"><i class="fab fa-python"></i> Python</div>
         <div class="language-tab" onclick="switchLanguage('java')"><i class="fab fa-java"></i> Java</div>
+        <div class="language-tab" onclick="switchLanguage('javascript')"><i class="fab fa-js-square"></i> JS</div>
+        <div class="language-tab" onclick="switchLanguage('typescript')"><i class="fas fa-microchip"></i> TS</div>
+        <div class="language-tab" onclick="switchLanguage('html')"><i class="fab fa-html5"></i> HTML</div>
+        <div class="language-tab" onclick="switchLanguage('css')"><i class="fab fa-css3-alt"></i> CSS</div>
+        <div class="language-tab" onclick="switchLanguage('django')"><i class="fas fa-code"></i> Django</div>
+        <div class="language-tab" onclick="switchLanguage('react')"><i class="fab fa-react"></i> React</div>
         <div class="language-tab" onclick="switchLanguage('arduino')"><i class="fas fa-microchip"></i> Arduino</div>
         <div class="language-tab" onclick="switchLanguage('verilog')"><i class="fas fa-microchip"></i> Verilog</div>
         <div class="language-tab" onclick="switchLanguage('systemverilog')"><i class="fas fa-microchip"></i> SystemVerilog</div>
+        <div class="language-tab" onclick="switchLanguage('uvm')"><i class="fas fa-microchip"></i> UVM</div>
     </div>
     <form method="post">
         <input type="hidden" name="language" id="languageInput" value="{{ language }}" />
@@ -737,9 +746,16 @@ HTML_TEMPLATE = """
     const languageMode = {
         python: "python",
         java: "text/x-java",
+        javascript: "javascript",
+        typescript: "javascript",
+        html: "text/html",
+        css: "text/css",
+        django: "python", // Django uses Python
+        react: "javascript", // React is JavaScript/JSX
         arduino: "text/x-c++src",
         verilog: "verilog",
         systemverilog: "verilog",
+        uvm: "verilog",
     };
 
     let editorInstance;
@@ -814,8 +830,13 @@ HTML_TEMPLATE = """
             javaMainClassContainer.style.display = (lang === 'java') ? 'block' : 'none';
         }
         if (pythonInputPromptsContainer) { 
-            pythonInputPromptsContainer.style.display = (lang === 'python') ? 'block' : 'none';
+            // Only show for Python and Django (Python-based framework)
+            const showPythonPrompts = ['python', 'django'].includes(lang);
+            pythonInputPromptsContainer.style.display = showPythonPrompts ? 'block' : 'none';
         }
+
+        // Make sure the chatbot button is visible when the debugger is active
+        updateChatbotVisibility(true);
     }
 
     function showDebugger() {
@@ -927,13 +948,18 @@ HTML_TEMPLATE = """
 
     document.addEventListener('DOMContentLoaded', function () {
         console.log("DOMContentLoaded fired.");
+        
         initializeElements();
 
         const initialLanguage = "{{ language }}";
         const initialCode = `{{ code | js_string }}`; 
         
-        initializeCodeMirror(initialLanguage, initialCode);
-        switchLanguage(initialLanguage);
+        if (document.getElementById("editor")) {
+            initializeCodeMirror(initialLanguage, initialCode);
+            switchLanguage(initialLanguage);
+        } else {
+            console.warn("Editor element not found. Skipping CodeMirror initialization.");
+        }
 
         if (debugForm) {
             debugForm.addEventListener("submit", function (event) {
@@ -948,15 +974,13 @@ HTML_TEMPLATE = """
             });
         }
         
-        // Add event listeners for language tabs
         if (languageTabs) {
-             languageTabs.forEach(tab => {
+            languageTabs.forEach(tab => {
                 const lang = tab.getAttribute('onclick').match(/'([^']+)'/)[1];
                 tab.addEventListener('click', () => switchLanguage(lang));
             });
         }
 
-        // Add event listeners for chatbot
         if (sendChatBtn && chatInput) {
             sendChatBtn.addEventListener('click', sendMessage);
             chatInput.addEventListener('keypress', function (e) {
@@ -966,11 +990,18 @@ HTML_TEMPLATE = """
             });
         }
 
-        // Reset debug button state
         if (debugButton) {
             debugButton.classList.remove('loading');
             debugButton.innerHTML = 'Debug Code';
             debugButton.disabled = false;
+        }
+        
+        // This is the core fix: Ensure the chatbot button is visible
+        // whenever the debugger container is shown.
+        if (document.getElementById('debuggerContainer').style.display !== 'none') {
+            updateChatbotVisibility(true);
+        } else {
+            updateChatbotVisibility(false);
         }
     });
 
@@ -997,7 +1028,9 @@ def _gemini_api_call_with_retries(func, *args, max_retries=5, initial_delay=1, *
     raise Exception(f"Failed after {max_retries} retries.")
 
 def preprocess_code(code):
-    code = code.replace("```python", "").replace("```java", "").replace("```arduino", "").replace("```verilog", "").replace("```systemverilog", "").replace("```", "")
+    # Update to handle new languages
+    code = re.sub(r'```(python|java|arduino|verilog|systemverilog|uvm|javascript|typescript|html|css|django|react)\s*', '', code, flags=re.IGNORECASE)
+    code = code.replace("```", "")
     code = code.replace("\t", "    ")
     code = re.sub(r'[^\x00-\x7F]+', '', code)
     code = re.sub(r'^\s*\.\.\..*$', '', code, flags=re.MULTILINE)
@@ -1022,12 +1055,12 @@ def fix_code_with_gemini(code, language):
     global fixed_code_result, explanation_text
     try:
         model = genai.GenerativeModel("gemini-1.5-flash",
-                                      safety_settings={
-                                          HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                                          HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                                          HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                                          HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                                      })
+                                     safety_settings={
+                                         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                                         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                                         HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                                         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                                     })
         chat = model.start_chat()
         prompt = ""
         if language == "java":
@@ -1054,20 +1087,8 @@ Format:
 <corrected_code>
 ---EXPLANATION---
 <explanation>"""
-        elif language == "verilog":
-            prompt = f"""Fix this Verilog code:
-{code}
-Requirements:
-1. Correct syntax errors and logical issues.
-2. Ensure proper module definition and port declarations.
-3. Provide clear and concise comments where necessary.
-4. If it's a testbench, ensure it instantiates the DUT correctly and includes initial/always blocks for simulation.
-Format:
-<corrected_code>
----EXPLANATION---
-<explanation>"""
-        elif language == "systemverilog":
-            prompt = f"""Fix this SystemVerilog code:
+        elif language in ["verilog", "systemverilog", "uvm"]:
+            prompt = f"""Fix this {language} code:
 {code}
 Requirements:
 1. Correct syntax errors and logical issues.
@@ -1078,7 +1099,30 @@ Format:
 <corrected_code>
 ---EXPLANATION---
 <explanation>"""
-        else:
+        elif language in ["javascript", "typescript"]:
+            prompt = f"""Fix this {language} code. 
+{code}
+Requirements:
+1. Correct syntax or logical errors.
+2. Ensure the code is runnable and produces expected output.
+3. Provide clear and concise comments where necessary.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        elif language in ["html", "css", "react", "django"]:
+            prompt = f"""Fix this {language} code.
+{code}
+Requirements:
+1. Correct syntax or logical errors.
+2. Ensure the code is well-structured and follows best practices.
+3. For React and Django, provide a runnable code snippet, but mention that a full project setup is required for real-world use.
+4. For HTML and CSS, provide a complete, well-formed code snippet.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        else: # Default to Python
             prompt = f"""Fix this Python code:
 {code}
 Requirements:
@@ -1090,6 +1134,7 @@ Format:
 <corrected_code>
 ---EXPLANATION---
 <explanation>"""
+
         response = _gemini_api_call_with_retries(chat.send_message, prompt)
         full = response.text.strip()
         if '---EXPLANATION---' in full:
@@ -1151,7 +1196,7 @@ def execute_arduino_code(code):
 
 def execute_verilog_code(code, language):
     temp_dir = tempfile.mkdtemp()
-    file_extension = ".v" if language == "verilog" else ".sv"
+    file_extension = ".v" if language in ["verilog"] else ".sv"
     file_path = os.path.join(temp_dir, f"design{file_extension}")
     output_vvp = os.path.join(temp_dir, "a.out")
     try:
@@ -1166,9 +1211,9 @@ def execute_verilog_code(code, language):
             run_result = subprocess.run(run_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
             if run_result.returncode != 0:
                 return f"\u274c Runtime Error (Simulation):\n{run_result.stderr}"
-            return run_result.stdout or "\u2705 Verilog/SystemVerilog compiled and ran successfully (no output to display)."
+            return run_result.stdout or "\u2705 Verilog/SystemVerilog/UVM compiled and ran successfully (no output to display)."
         else:
-            return "\u2705 Verilog/SystemVerilog compiled successfully (no testbench found for simulation)."
+            return "\u2705 Verilog/SystemVerilog/UVM compiled successfully (no testbench found for simulation)."
     except subprocess.TimeoutExpired:
         return "\u274c Execution timed out."
     except Exception as e:
@@ -1178,6 +1223,63 @@ def execute_verilog_code(code, language):
             shutil.rmtree(temp_dir)
         except Exception as e:
             print(f"Error during Verilog cleanup: {e}")
+
+def execute_javascript_code(code):
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".js", mode='w')
+    temp_file.write(code)
+    temp_file.close()
+    try:
+        run_command = ['node', temp_file.name]
+        run_result = subprocess.run(run_command, capture_output=True, text=True, timeout=10)
+        if run_result.returncode != 0:
+            return f"\u274c Runtime Error:\n{run_result.stderr}"
+        return run_result.stdout or "\u2705 Ran successfully, no output."
+    except FileNotFoundError:
+        return "\u274c Error: Node.js is not installed or not in your system's PATH. Please install it to execute JavaScript code."
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
+    except Exception as e:
+        return f"\u274c Execution error: {str(e)}"
+    finally:
+        os.remove(temp_file.name)
+
+def execute_typescript_code(code):
+    temp_ts_file = tempfile.NamedTemporaryFile(delete=False, suffix=".ts", mode='w')
+    temp_ts_file.write(code)
+    temp_ts_file.close()
+    
+    temp_js_file_path = temp_ts_file.name.replace(".ts", ".js")
+    
+    try:
+        compile_command = ['tsc', '--outFile', temp_js_file_path, temp_ts_file.name]
+        compile_result = subprocess.run(compile_command, capture_output=True, text=True, timeout=15)
+        
+        if compile_result.returncode != 0:
+            return f"\u274c Compilation Error:\n{compile_result.stderr}"
+        
+        run_command = ['node', temp_js_file_path]
+        run_result = subprocess.run(run_command, capture_output=True, text=True, timeout=10)
+        
+        if run_result.returncode != 0:
+            return f"\u274c Runtime Error:\n{run_result.stderr}"
+            
+        return run_result.stdout or "\u2705 Ran successfully, no output."
+        
+    except FileNotFoundError as e:
+        if 'tsc' in str(e):
+            return "\u274c Error: TypeScript compiler ('tsc') is not installed. Please install it globally via `npm install -g typescript`."
+        elif 'node' in str(e):
+            return "\u274c Error: Node.js is not installed. Please install it to execute TypeScript code."
+        else:
+            return f"\u274c Execution Error: {str(e)}"
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
+    except Exception as e:
+        return f"\u274c Execution error: {str(e)}"
+    finally:
+        os.remove(temp_ts_file.name)
+        if os.path.exists(temp_js_file_path):
+            os.remove(temp_js_file_path)
 
 def validate_and_execute_code(code, language, test_inputs=None, java_main_class=None):
     try:
@@ -1202,8 +1304,18 @@ def validate_and_execute_code(code, language, test_inputs=None, java_main_class=
             return execute_java_code(code, java_main_class)
         elif language == "arduino":
             return execute_arduino_code(code)
-        elif language in ["verilog", "systemverilog"]:
+        elif language in ["verilog", "systemverilog", "uvm"]:
             return execute_verilog_code(code, language)
+        elif language == "javascript":
+            return execute_javascript_code(code)
+        elif language == "typescript":
+            return execute_typescript_code(code)
+        elif language in ["html", "css", "django", "react"]:
+            # These are frameworks or markup/style languages that can't be "executed" as a single file.
+            if language in ["django", "react"]:
+                return f"\u2705 Code fixed successfully. Note: {language.capitalize()} requires a full project setup to run. The AI has provided the corrected snippet."
+            else: # HTML/CSS
+                return f"\u2705 Code fixed successfully. To see this {language.upper()} code in action, you need to open it in a web browser. The execution panel shows the raw, corrected code."
     except Exception as e:
         return f"\u274c Execution failed: {str(e)}"
 
@@ -1247,17 +1359,31 @@ def index():
 @app.route("/download")
 def download():
     global fixed_code_result
+    ext = ".txt" # Default extension
     if "void setup()" in fixed_code_result or "void loop()" in fixed_code_result:
         ext = ".ino"
     elif "public class" in fixed_code_result or "class " in fixed_code_result:
         ext = ".java"
-    elif "module " in fixed_code_result:
+    elif re.search(r'module\s+', fixed_code_result, re.IGNORECASE) or re.search(r'class\s+extends\s+uvm', fixed_code_result, re.IGNORECASE):
         if "logic" in fixed_code_result or "interface" in fixed_code_result or "class " in fixed_code_result:
             ext = ".sv"
         else:
             ext = ".v"
+    elif fixed_code_result.strip().startswith('<!DOCTYPE html>'):
+        ext = ".html"
+    elif re.search(r'selector\s*\{', fixed_code_result):
+        ext = ".css"
+    elif "import React" in fixed_code_result:
+        ext = ".jsx"
+    elif "from django.db import models" in fixed_code_result:
+        ext = ".py"
+    elif fixed_code_result.strip().startswith('import React') or "function" in fixed_code_result or "const" in fixed_code_result:
+        ext = ".js"
+    elif "let" in fixed_code_result or "const" in fixed_code_result or "function" in fixed_code_result:
+        ext = ".ts"
     else:
         ext = ".py"
+
     response = make_response(fixed_code_result)
     response.headers["Content-Disposition"] = f"attachment; filename=debugged_code{ext}"
     response.mimetype = "text/plain"
@@ -1270,12 +1396,12 @@ def send_chat_message():
         return jsonify({"response": "Error: No message provided."}), 400
     try:
         model = genai.GenerativeModel("gemini-1.5-flash",
-                                      safety_settings={
-                                          HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                                          HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                                          HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                                          HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-                                      })
+                                     safety_settings={
+                                         HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                                         HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                                         HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                                         HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+                                     })
         chat_session = model.start_chat(history=[])
         response = _gemini_api_call_with_retries(chat_session.send_message, user_message)
         ai_response = response.text
@@ -1300,7 +1426,17 @@ if __name__ == "__main__":
         iverilog_check = subprocess.run(['iverilog', '-v'], capture_output=True, text=True, check=False)
         print("Icarus Verilog:", iverilog_check.stdout.strip().split('\n')[0].strip() if iverilog_check.stdout else "Not found.")
     except Exception as e:
-        print(f"\u26a0\ufe0f Icarus Verilog (iverilog) not found or not added to PATH. Verilog/SystemVerilog compilation will not work. Error: {e}")
+        print(f"\u26a0\ufe0f Icarus Verilog (iverilog) not found or not added to PATH. Verilog/SystemVerilog/UVM compilation will not work. Error: {e}")
+    try:
+        node_check = subprocess.run(['node', '-v'], capture_output=True, text=True, check=False)
+        print("Node.js:", node_check.stdout.strip() if node_check.stdout else "Not found.")
+    except Exception as e:
+        print(f"\u26a0\ufe0f Node.js not found or not added to PATH. JavaScript and TypeScript execution will not work. Error: {e}")
+    try:
+        tsc_check = subprocess.run(['tsc', '-v'], capture_output=True, text=True, check=False)
+        print("TypeScript Compiler (tsc):", tsc_check.stdout.strip() if tsc_check.stdout else "Not found.")
+    except Exception as e:
+        print(f"\u26a0\ufe0f TypeScript compiler ('tsc') not found. TypeScript compilation will not work. Error: {e}")
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
