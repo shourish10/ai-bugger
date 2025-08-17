@@ -10,10 +10,15 @@ import subprocess
 import tempfile
 import time
 import shutil
+from PIL import Image
 
 load_dotenv()
 app = Flask(__name__)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# Global state to store the AI's response for download
+fixed_code_result = ""
+explanation_text = ""
 
 def _js_string_filter(s):
     if s is None:
@@ -40,545 +45,476 @@ HTML_TEMPLATE = """
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/xml/xml.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.12/mode/css/css.min.js"></script>
     <style>
-        /* General Body and Container Styles */
-        body {
-            margin: 0;
-            font-family: 'Fira Sans', sans-serif;
-            background: #15151e;
-            color: #fff;
-            background-repeat: repeat;
+        /* ==========================================================================
+           Color Variables
+           ========================================================================== */
+        :root {
+            /* Dark Theme */
+            --bg-primary-dark: #121212;
+            --bg-secondary-dark: #1e1e1e;
+            --bg-card-dark: #282828;
+            --bg-input-dark: #121212;
+            --text-primary-dark: #E0E0E0;
+            --text-secondary-dark: #B0B0B0;
+            --accent-green: #92FE9D;
+            --accent-blue: #00C9FF;
+            --border-color-dark: #333;
+            --shadow-color-dark: rgba(0, 0, 0, 0.5);
+
+            /* Light Theme */
+            --bg-primary-light: #f5f5f5;
+            --bg-secondary-light: #ffffff;
+            --bg-card-light: #e0e0e0;
+            --bg-input-light: #ffffff;
+            --text-primary-light: #333;
+            --text-secondary-light: #666;
+            --border-color-light: #ccc;
+            --shadow-color-light: rgba(0, 0, 0, 0.1);
         }
 
-        /* ------------- WELCOME PAGE ------------ */
+        body.dark {
+            --bg-primary: var(--bg-primary-dark);
+            --bg-secondary: var(--bg-secondary-dark);
+            --bg-card: var(--bg-card-dark);
+            --bg-input: var(--bg-input-dark);
+            --text-primary: var(--text-primary-dark);
+            --text-secondary: var(--text-secondary-dark);
+            --border-color: var(--border-color-dark);
+            --shadow-color: var(--shadow-color-dark);
+            --cursor-color: white;
+        }
+
+        body.light {
+            --bg-primary: var(--bg-primary-light);
+            --bg-secondary: var(--bg-secondary-light);
+            --bg-card: var(--bg-card-light);
+            --bg-input: var(--bg-input-light);
+            --text-primary: var(--text-primary-light);
+            --text-secondary: var(--text-secondary-light);
+            --border-color: var(--border-color-light);
+            --shadow-color: var(--shadow-color-light);
+            --cursor-color: black;
+        }
+        
+        /* ==========================================================================
+           General Styles & Utilities
+           ========================================================================== */
+
+        body {
+            font-family: 'Fira Sans', sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            margin: 0;
+            line-height: 1.6;
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 40px auto;
+            padding: 30px;
+            background: var(--bg-secondary);
+            border-radius: 15px;
+            box-shadow: 0 10px 30px var(--shadow-color);
+            transition: all 0.3s ease;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 2.5rem;
+            position: relative;
+        }
+
+        .header h1 {
+            font-size: 3.5rem;
+            font-weight: 900;
+            color: var(--text-primary);
+            margin: 0 0 10px;
+            text-shadow: 0 4px 15px rgba(0, 255, 255, 0.4);
+            letter-spacing: 0.05em;
+            animation: fadeIn 1s ease-in-out;
+        }
+
+        .header p {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            margin: 0;
+            animation: fadeIn 1.5s ease-in-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .theme-toggle-button {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 1.2rem;
+            transition: all 0.3s ease;
+        }
+        .theme-toggle-button:hover {
+            transform: scale(1.1);
+        }
+        .theme-toggle-button i.fa-sun { color: #f39c12; }
+        .theme-toggle-button i.fa-moon { color: #f1c40f; }
+
+
+        /* ==========================================================================
+           Welcome Screen
+           ========================================================================== */
+
         .welcome-screen {
             display: {{ 'none' if code or result or explanation or output else 'flex' }};
-            height: 100vh;
-            width: 100vw;
-            background: radial-gradient(circle at 20% 30%,#7fdfff77 0%, #a7a6ff66 60%, #23233a 100%);
-            align-items: center;
-            justify-content: center;
             flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background: linear-gradient(135deg, #1f1c2c, #353457);
+            color: #f0f0f0;
+            text-align: center;
+            animation: background-pan 10s infinite alternate linear;
             position: relative;
             overflow: hidden;
-            transition: all 0.9s cubic-bezier(.7,0,.3,1);
         }
+        
+        /* Wavy grid background */
+        .wavy-grid-bg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: radial-gradient(rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+            background-size: 30px 30px;
+            z-index: 0;
+            opacity: 0.3;
+            animation: wavy-move 30s linear infinite;
+        }
+
+        @keyframes wavy-move {
+            0% { background-position: 0 0; }
+            100% { background-position: 100% 100%; }
+        }
+
+        /* Rotating 3D Cubes */
+        .cubes-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            perspective: 800px;
+            z-index: 1;
+        }
+
+        .cube {
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            opacity: 0.1;
+            transform-style: preserve-3d;
+            animation: cube-rotate 20s linear infinite, cube-move 15s ease-in-out infinite alternate;
+        }
+
+        .cube-face {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border: 1px solid rgba(0, 255, 255, 0.2);
+            background: rgba(0, 255, 255, 0.1);
+        }
+
+        .cube-face:nth-child(1) { transform: rotateY(0deg) translateZ(25px); }
+        .cube-face:nth-child(2) { transform: rotateX(90deg) translateZ(25px); }
+        .cube-face:nth-child(3) { transform: rotateY(90deg) translateZ(25px); }
+        .cube-face:nth-child(4) { transform: rotateY(180deg) translateZ(25px); }
+        .cube-face:nth-child(5) { transform: rotateY(-90deg) translateZ(25px); }
+        .cube-face:nth-child(6) { transform: rotateX(-90deg) translateZ(25px); }
+        
+        .cube:nth-child(1) { top: 20%; left: 15%; animation-delay: 0s; }
+        .cube:nth-child(2) { top: 60%; left: 80%; animation-delay: 3s; }
+        .cube:nth-child(3) { top: 80%; left: 30%; animation-delay: 6s; }
+        .cube:nth-child(4) { top: 10%; left: 50%; animation-delay: 9s; }
+        .cube:nth-child(5) { top: 40%; left: 60%; animation-delay: 12s; }
+
+        @keyframes cube-rotate {
+            from { transform: rotateX(0deg) rotateY(0deg); }
+            to { transform: rotateX(360deg) rotateY(360deg); }
+        }
+        @keyframes cube-move {
+            from { transform: translateY(0); }
+            to { transform: translateY(50px); }
+        }
+
+        @keyframes background-pan {
+            from { background-position: 0% 0%; }
+            to { background-position: 100% 100%; }
+        }
+
         .hero-content {
-            position: relative;
-            z-index: 3;
-            text-align: center;
+            z-index: 2;
         }
+
         .hero-content h1 {
-            font-size: 5.9rem;
+            font-size: 5rem;
             font-weight: 900;
-            color: #000000;
-            letter-spacing: 0.02em;
-            margin-bottom: 0.6em;
-            text-shadow: 0 6px 32px #2637ff40, 0 1px 2px #16edd7, 0 8px 40px #3986fd20;
-            font-family: 'Fira Sans', sans-serif;
-            text-align: center;
-            white-space: nowrap;
-            overflow: hidden;
-            border-right: .15em solid orange;
-            animation: 
-              typing 3.5s steps(40, end),
-              blink-caret .75s step-end infinite;
-        }
-
-        /* Typing effect */
-        @keyframes typing {
-          from { width: 0 }
-          to { width: 100% }
-        }
-
-        /* The typewriter cursor effect */
-        @keyframes blink-caret {
-          from, to { border-color: transparent }
-          50% { border-color: orange; }
+            text-shadow: 0 5px 20px rgba(0, 255, 255, 0.3);
+            margin: 0;
+            animation: text-glow 2s ease-in-out infinite alternate;
         }
 
         .hero-content p {
-            color: #cbeefd;
-            font-size: 1.3rem;
-            max-width: 500px;
-            margin: 0 auto 2.5em auto;
-            font-weight: 400;
+            font-size: 1.5rem;
+            max-width: 600px;
+            margin: 1rem auto 2.5rem;
+            color: #C0C0C0;
         }
-        .hero-btn-group {
-            margin-top: 1.7em;
-            display: flex;
-            justify-content: center;
-            gap: 1.3em;
-        }
-        @keyframes blinkColors {
-            0%   { background: linear-gradient(90deg,#6dc6fb 30%, #5affc3 100%); box-shadow: 0 0 18px #54dbff90; }
-            20%  { background: linear-gradient(90deg,#f38eff 30%, #ffd96a 100%); box-shadow: 0 0 21px #fd8ecb70; }
-            40%  { background: linear-gradient(90deg,#5ac8fa 30%,#54dede 100%); box-shadow: 0 0 18px #1be5c350; }
-            60%  { background: linear-gradient(90deg,#a7a6ff 30%,#7fdfff 100%); box-shadow: 0 0 22px #94ffca50;}
-            80%  { background: linear-gradient(90deg,#6dc6fb 30%, #5affc3 100%); box-shadow: 0 0 18px #54dbff90; }
-            100% { background: linear-gradient(90deg,#6dc6fb 30%, #5affc3 100%); box-shadow: 0 0 18px #54dbff90; }
-        }
+
         .hero-btn {
-            font-family: inherit;
-            font-size: 1.09rem;
-            color: #183050;
+            background: linear-gradient(45deg, #00C9FF, #92FE9D);
             border: none;
-            padding: 0.95em 2.3em;
-            border-radius: 30px;
+            padding: 15px 40px;
+            font-size: 1.2rem;
             font-weight: 700;
+            border-radius: 50px;
+            color: #121212;
             cursor: pointer;
-            outline: none;
-            animation: blinkColors 1.35s infinite;
-            transition: background 0.2s, color 0.2s, box-shadow 0.2s;
-            box-shadow: 0 3px 24px #2cfbe260;
+            box-shadow: 0 5px 20px rgba(0, 201, 255, 0.3);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
         }
+
         .hero-btn:hover {
-            color: #0d3144;
-            filter: brightness(1.1);
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0, 201, 255, 0.5);
         }
-        .hero-btn.login {
-            background: transparent;
-            color: #e2f4fc;
-            border: 2px solid #00dfcc66;
-            box-shadow: none;
+
+        @keyframes text-glow {
+            from { text-shadow: 0 5px 20px rgba(0, 255, 255, 0.3); }
+            to { text-shadow: 0 8px 25px rgba(146, 254, 157, 0.5); }
         }
-        .hero-btn.login:hover {
-            background: #131b3144;
-        }
-        /* Floating animated icons */
-        .floating-icons {
-            position: absolute;
-            left: 0; top: 0; width: 100%; height: 100%;
-            z-index: 1;
-            pointer-events: none;
-        }
-        .floating-icon {
-            position: absolute;
-            opacity: 0.2;
-            font-size: 2.3rem;
-            color: #fff;
-            filter: blur(0.5px);
-            animation: floatIcon 8s ease-in-out infinite;
-        }
-        .floating-icon.icon-1 { left: 10%;  top: 18%; font-size: 2.4rem; color: #49ffe0; animation-delay: 0s;}
-        .floating-icon.icon-2 { left: 80%;  top: 12%; font-size: 3.0rem; color: #ffd96a; animation-delay: 1s;}
-        .floating-icon.icon-3 { left: 25%;  top: 70%; font-size: 2.2rem; color: #f38eff; animation-delay: 2.2s;}
-        .floating-icon.icon-4 { left: 70%;  top: 75%; font-size: 2rem; color: #b9ff8a; animation-delay: 4s;}
-        .floating-icon.icon-5 { left: 50%;  top: 45%; font-size: 2.6rem; color: #a9caff; animation-delay: 1.6s;}
-        @keyframes floatIcon {
-            0% {transform: translateY(0);}
-            50% { transform: translateY(-35px); }
-            100% { transform: translateY(0);}
-        }
-        /* ------------- MODAL ------------ */
-        .modal {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(34,52,70,0.63);
-            justify-content: center;
-            align-items: center;
-            z-index: 2000;
-        }
-        .modal-content {
-            background: #2c2f41;
-            padding: 36px 30px 24px 30px;
-            border-radius: 13px;
-            width: 90%;
-            max-width: 430px;
-            text-align: center;
-            box-shadow: 0 2px 44px #272adc65;
-        }
-        .modal input {
-            display: block;
-            width: 100%;
-            padding: 11px;
-            margin: 15px 0;
-            border-radius: 7px;
-            border: none;
-            background: #293360;
-            color: white;
-            font-size: 1.07rem;
-        }
-        .modal button {
-            background: #1af0ff;
-            color: #0e1935;
-            padding: 10px 0;
-            width: 100%;
-            border: none;
-            border-radius: 7px;
-            font-weight: 700;
-            font-size: 1.08rem;
-            cursor: pointer;
-            margin-top: 10px;
-        }
-        /* ------------- DEBUGGER PAGE ------------ */
-        .container {
-            display: {{ 'block' if code or result or explanation or output else 'none' }};
-            max-width: 1400px;
-            margin: 40px auto;
-            padding: 30px 10px;
-            border-radius: 35px;
-            background: linear-gradient(110deg, #112230 82%, #292d54 100%);
-            box-shadow: 0 8px 48px #0089ff37;
-        }
-        .header {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-        }
-        .header h1 {
-            font-size: 2.9rem;
-            font-weight: 900;
-            color: #FFFFFF;
-            margin-bottom: 8px;
-            text-shadow: 0 3px 15px #54dbff50, 0 1px 5px #0ffbe050;
-            font-family: 'Fira Sans', sans-serif;
-            letter-spacing: 0.03em;
-            text-align: center;
-            white-space: nowrap;
-            overflow: hidden;
-            border-right: .15em solid orange;
-            animation: 
-              typing 3.5s steps(40, end),
-              blink-caret .75s step-end infinite;
-        }
-        .header p {
-            color: #b7edff;
-            margin-bottom: 30px;
-            text-align: center;
-        }
+
+        /* ==========================================================================
+           Language Tabs
+           ========================================================================== */
+
         .language-tabs {
             display: flex;
-            gap: 18px;
-            margin: 20px 0;
             justify-content: center;
-            flex-wrap: wrap; /* Allow tabs to wrap on smaller screens */
+            flex-wrap: wrap;
+            gap: 15px;
+            margin-bottom: 2rem;
         }
+
         .language-tab {
-            padding: 8px 26px;
-            border-radius: 10px;
-            border: 1.5px solid #2fe6c9;
-            background: #202745;
-            color: #aaffff;
-            font-size: 1.12rem;
-            cursor: pointer;
+            background: var(--bg-card);
+            color: var(--accent-green);
+            padding: 10px 20px;
+            border-radius: 8px;
             font-weight: 600;
-            transition: all 0.22s;
-            display: flex; /* Make icons and text align */
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
             align-items: center;
-            gap: 8px; /* Space between icon and text */
+            gap: 10px;
+            border: 1px solid var(--border-color);
         }
+
+        .language-tab:hover {
+            background: var(--border-color);
+            transform: translateY(-2px);
+        }
+
         .language-tab.active {
-            background: linear-gradient(90deg,#43effd 30%, #13e7c7 100%);
-            color: #113366;
-            border-color: #43effd;
-            font-weight: 700;
+            background: linear-gradient(45deg, var(--accent-blue), var(--accent-green));
+            color: var(--bg-primary-dark);
+            border: 1px solid var(--accent-green);
+            transform: translateY(-3px);
+            box-shadow: 0 4px 15px rgba(146, 254, 157, 0.3);
         }
+
+        /* ==========================================================================
+           Editor & Output Panels
+           ========================================================================== */
+        
         .split-view {
             display: flex;
-            gap: 24px;
+            gap: 30px;
             flex-wrap: wrap;
         }
+
         .code-editor, .output-panel {
             flex: 1;
-            min-width: 360px;
-            background: #1a2240; /* Consistent background for editor/output panels */
+            min-width: 400px;
+            background: var(--bg-secondary);
             padding: 20px;
             border-radius: 12px;
-            box-shadow: 0 4px 20px rgba(0,0,0,0.3); /* Enhanced shadow */
-        }
-        #editor {
-            height: 400px;
-            border: 1px solid #334466; /* Border for editor */
-            border-radius: 8px; /* Rounded corners for editor */
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.2);
         }
 
-        /* Codemirror overrides for theme */
-        .CodeMirror {
-            border: 1px solid #334466;
+        .output-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        h3 {
+            color: var(--accent-blue);
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 10px;
+            margin-top: 0;
+            font-size: 1.5rem;
+            font-weight: 700;
+        }
+
+        pre, .execution-output {
+            background: var(--bg-input);
+            padding: 15px;
             border-radius: 8px;
-            background: #101329; /* Darker background for code editor */
-            color: #bbfcff;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
             font-family: 'Source Code Pro', monospace;
+            border: 1px solid var(--border-color);
+            box-shadow: inset 0 0 5px rgba(0,0,0,0.3);
+        }
+
+        .execution-output {
+            color: var(--accent-green);
+        }
+        
+        /* ==========================================================================
+           CodeMirror & Form Elements
+           ========================================================================== */
+
+        .CodeMirror {
+            height: 450px;
             font-size: 1rem;
+            line-height: 1.5;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
         }
+
         .CodeMirror-gutters {
-            background: #101329;
-            border-right: 1px solid #334466;
+            background: var(--bg-input);
+            border-right: 1px solid var(--border-color);
+            transition: background-color 0.3s ease, border-color 0.3s ease;
         }
-        .CodeMirror-linenumber {
-            color: #6a7c99;
-        }
+        
         .CodeMirror-cursor {
-            border-left: 1px solid #fff;
+            border-left: 1px solid var(--cursor-color) !important;
+            transition: border-color 0.3s ease;
         }
-        /* End Codemirror overrides */
+
+        .CodeMirror-linenumber {
+            color: var(--text-secondary);
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 10px 15px;
+            margin-top: 10px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-family: 'Fira Sans', sans-serif;
+            transition: all 0.2s ease;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 0 2px rgba(0, 201, 255, 0.3);
+        }
+
+        /* ==========================================================================
+           Buttons
+           ========================================================================== */
 
         .button-group {
-            margin-top: 22px;
             display: flex;
-            gap: 12px;
-            justify-content: flex-end; /* Align buttons to the right */
+            justify-content: flex-end;
+            gap: 15px;
+            margin-top: 20px;
         }
+
         .button {
-            padding: 11px 22px;
-            background: linear-gradient(90deg,#16edd7 40%,#4874fe 100%);
-            color: #fff;
-            border: none;
-            border-radius: 7px;
-            cursor: pointer;
+            padding: 12px 25px;
+            border-radius: 8px;
             font-size: 1rem;
             font-weight: 600;
-            transition: all 0.3s ease; /* Smooth transition for buttons */
-            box-shadow: 0 4px 15px rgba(0,0,0,0.2); /* Button shadow */
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: none;
+            text-decoration: none;
+            text-align: center;
         }
-        .button:hover {
-            background: linear-gradient(90deg,#58e1fe 30%,#1be5c3 100%);
-            color: #133944;
-            transform: translateY(-2px); /* Slight lift on hover */
-            box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+        
+        .button.debug {
+            background: linear-gradient(45deg, var(--accent-blue), var(--accent-green));
+            color: var(--bg-primary-dark);
         }
+
+        .button.debug:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 5px 20px rgba(0, 201, 255, 0.3);
+        }
+
+        .button.download {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+        
+        .button.download:hover {
+            background: var(--border-color);
+        }
+
         .button.loading {
-            background: linear-gradient(90deg, #666 40%, #999 100%); /* Grey out when loading */
+            background: var(--text-secondary);
             cursor: not-allowed;
+            color: var(--bg-secondary);
         }
+        
         .button.loading .spinner {
             border: 2px solid rgba(255, 255, 255, 0.3);
             border-top: 2px solid #fff;
             border-radius: 50%;
-            width: 12px;
-            height: 12px;
+            width: 16px;
+            height: 16px;
             animation: spin 1s linear infinite;
             display: inline-block;
-            margin-left: 8px;
+            margin-left: 10px;
             vertical-align: middle;
         }
+        
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
 
-        .execution-output {
-            background-color: #101329;
-            color: #0fcaca;
-            padding: 15px;
-            border-radius: 9px;
-            box-shadow: 0 0 15px #4bffe367;
-            margin-top: 12px;
-            font-family: 'Source Code Pro', monospace;
-            white-space: pre-wrap; /* Ensure wrapping here too */
-            word-wrap: break-word;
-            overflow-x: auto;
-        }
-        pre {
-            font-family: 'Source Code Pro', monospace;
-            border-radius: 6px;
-            background: #101329; /* Darker background for pre tags */
-            padding: 13px;
-            color: #bbfcff;
-            white-space: pre-wrap;   /* Fix: Allows wrapping of long lines */
-            word-wrap: break-word;   /* Fix: Breaks words if necessary */
-            overflow-x: auto;        /* Fix: Adds horizontal scroll if lines are still too long */
-            box-shadow: inset 0 0 8px rgba(0,255,255,0.1); /* Subtle inner glow */
-        }
+        /* ==========================================================================
+           Chatbot
+           ========================================================================== */
 
-        /* General Input Field Styling */
-        input[type="text"] {
-            display: block;
-            width: calc(100% - 24px); /* Account for padding */
-            padding: 10px 12px;
-            margin-top: 10px;
-            border-radius: 8px;
-            border: 1px solid #334466;
-            background: #1e253a;
-            color: #e0f2f7;
-            font-size: 0.95rem;
-            font-family: 'Fira Sans', sans-serif;
-            outline: none;
-            transition: border-color 0.2s, box-shadow 0.2s;
-        }
-
-        input[type="text"]::placeholder {
-            color: #9bb7c7;
-        }
-
-        input[type="text"]:focus {
-            border-color: #43effd;
-            box-shadow: 0 0 0 2px rgba(67, 239, 253, 0.3);
-        }
-
-        /* Headings within panels */
-        .code-editor h3, .output-panel h3 {
-            color: #fff;
-            margin-top: 0;
-            margin-bottom: 15px;
-            font-weight: 700;
-            font-size: 1.4rem;
-            border-bottom: 2px solid #334466; /* Underline effect */
-            padding-bottom: 8px;
-        }
-        
-        /* Responsive adjustments */
-        @media (max-width: 900px) {
-            .split-view { flex-direction: column; }
-            .code-editor, .output-panel { min-width: unset; width: 100%; }
-        }
-        @media (max-width: 600px) {
-            .welcome-content h1 { font-size: 2.2rem; }
-            .welcome-content p { font-size: 1.01rem; }
-            .container { margin: 13px 0; padding: 10px 4px; }
-            .language-tabs { flex-direction: column; align-items: center; } /* Stack tabs vertically */
-        }
-
-        /* Custom scrollbar styles (Webkit browsers) */
-        ::-webkit-scrollbar {
-            width: 10px;
-            height: 10px;
-        }
-
-        ::-webkit-scrollbar-track {
-            background: #1a2240;
-            border-radius: 10px;
-        }
-
-        ::-webkit-scrollbar-thumb {
-            background: #43effd;
-            border-radius: 10px;
-            border: 2px solid #1a2240;
-        }
-
-        ::-webkit-scrollbar-thumb:hover {
-            background: #13e7c7;
-        }
-
-        /* Chatbot Styles */
-        .chatbot-container {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            width: 350px;
-            height: 450px;
-            background: #202745;
-            border-radius: 15px;
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-            z-index: 1000;
-            transform: translateY(100%); /* Start off-screen */
-            opacity: 0;
-            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
-        }
-        .chatbot-container.active {
-            transform: translateY(0);
-            opacity: 1;
-        }
-        .chatbot-header {
-            background: linear-gradient(90deg, #43effd 30%, #13e7c7 100%);
-            color: #113366;
-            padding: 15px;
-            font-size: 1.2rem;
-            font-weight: 700;
-            border-top-left-radius: 15px;
-            border-top-right-radius: 15px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-        }
-        .chatbot-header i {
-            font-size: 1.5rem;
-        }
-        .chatbot-header .close-btn {
-            background: none;
-            border: none;
-            color: #113366;
-            font-size: 1.5rem;
-            cursor: pointer;
-            padding: 0 5px;
-            transition: transform 0.2s;
-        }
-        .chatbot-header .close-btn:hover {
-            transform: rotate(90deg);
-        }
-        .chatbot-messages {
-            flex-grow: 1;
-            padding: 15px;
-            overflow-y: auto;
-            background-color: #1a2240;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        .message {
-            max-width: 80%;
-            padding: 10px 15px;
-            border-radius: 15px;
-            font-size: 0.95rem;
-            line-height: 1.4;
-            word-wrap: break-word;
-        }
-        .user-message {
-            background-color: #007bff;
-            color: white;
-            align-self: flex-end;
-            border-bottom-right-radius: 5px;
-        }
-        .bot-message {
-            background-color: #334466;
-            color: #e0f2f7;
-            align-self: flex-start;
-            border-bottom-left-radius: 5px;
-        }
-        .chatbot-input {
-            display: flex;
-            padding: 10px 15px;
-            border-top: 1px solid #334466;
-            background-color: #202745;
-        }
-        .chatbot-input input {
-            flex-grow: 1;
-            border: 1px solid #334466;
-            border-radius: 20px;
-            padding: 10px 15px;
-            background-color: #1e253a;
-            color: #e0f2f7;
-            font-size: 0.95rem;
-            margin-top: 0; /* Override default input margin */
-            margin-right: 10px;
-        }
-        .chatbot-input input:focus {
-            border-color: #43effd;
-            box-shadow: 0 0 0 2px rgba(67, 239, 253, 0.3);
-        }
-        .chatbot-input button {
-            background: linear-gradient(90deg,#16edd7 40%,#4874fe 100%);
-            border: none;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: background 0.2s, transform 0.2s;
-            box-shadow: 2px 2px 10px rgba(0,0,0,0.3);
-            color: white; /* Icon color */
-            font-size: 1rem;
-            padding: 0; /* Remove default button padding */
-            margin-top: 0; /* Override default button margin */
-        }
-        .chatbot-input button:hover {
-            background: linear-gradient(90deg,#58e1fe 30%,#1be5c3 100%);
-            transform: translateY(-1px);
-        }
         .chatbot-toggle-button {
             position: fixed;
-            bottom: 20px;
-            right: 20px;
-            background: linear-gradient(90deg,#43effd 30%, #13e7c7 100%);
-            color: #113366;
+            bottom: 30px;
+            right: 30px;
+            background: linear-gradient(45deg, var(--accent-green), var(--accent-blue));
+            color: var(--bg-primary-dark);
             border: none;
             border-radius: 50%;
             width: 60px;
@@ -589,60 +525,329 @@ HTML_TEMPLATE = """
             justify-content: center;
             cursor: pointer;
             box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-            z-index: 1001; /* Above the chatbot container when hidden */
-            transition: transform 0.3s ease-out, opacity 0.3s ease-out;
+            z-index: 1001;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
         }
-        .chatbot-toggle-button.hidden {
+
+        .chatbot-toggle-button:hover {
+            transform: scale(1.1);
+            box-shadow: 0 6px 25px rgba(0, 255, 255, 0.5);
+        }
+        
+        .chatbot-container {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            width: 350px;
+            height: 450px;
+            background: var(--bg-card);
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            z-index: 1000;
+            transform: scale(0.8) translateY(20px);
             opacity: 0;
-            pointer-events: none; /* Make it unclickable when hidden */
+            pointer-events: none;
+            transition: all 0.3s cubic-bezier(0.68, -0.55, 0.27, 1.55);
         }
-        .chatbot-toggle-button i {
-            animation: pulse 1.5s infinite;
+
+        .chatbot-container.active {
+            transform: scale(1) translateY(0);
+            opacity: 1;
+            pointer-events: auto;
         }
-        @keyframes pulse {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.05); }
-            100% { transform: scale(1); }
+
+        .chatbot-header {
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+            color: var(--bg-primary-dark);
+            padding: 15px;
+            font-size: 1.2rem;
+            font-weight: 700;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border-color);
         }
+        
+        .chatbot-header .close-btn {
+            background: none;
+            border: none;
+            color: var(--bg-primary-dark);
+            font-size: 1.5rem;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        .chatbot-header .close-btn:hover {
+            transform: rotate(90deg);
+        }
+
+        .chatbot-messages {
+            flex-grow: 1;
+            padding: 15px;
+            overflow-y: auto;
+            background-color: var(--bg-secondary);
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .message {
+            max-width: 80%;
+            padding: 12px 18px;
+            border-radius: 20px;
+            font-size: 0.95rem;
+            word-wrap: break-word;
+            line-height: 1.4;
+            animation: message-fade-in 0.3s ease-out;
+        }
+
+        @keyframes message-fade-in {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .user-message {
+            background: #007BFF;
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 5px;
+        }
+        
+        .bot-message {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+        }
+        
         .typing-indicator {
             display: flex;
             gap: 4px;
-            padding: 10px 15px;
-            border-radius: 15px;
-            background-color: #334466;
-            color: #e0f2f7;
+            padding: 12px 18px;
+            border-radius: 20px;
+            background: var(--bg-card);
+            color: var(--text-primary);
             align-self: flex-start;
             border-bottom-left-radius: 5px;
-            font-size: 0.95rem;
         }
+        
         .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: var(--text-primary);
+            border-radius: 50%;
             animation: blink 1s infinite;
         }
-        .typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
-        .typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+        
         @keyframes blink {
             0%, 100% { opacity: 0.2; }
             50% { opacity: 1; }
         }
-        /* Responsive Chatbot */
-        @media (max-width: 400px) {
+        
+        .chatbot-input {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            background: var(--bg-card);
+        }
+        
+        .chatbot-input input {
+            flex-grow: 1;
+            padding: 12px;
+            border-radius: 25px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-input);
+            color: var(--text-primary);
+            margin-right: 10px;
+            transition: all 0.2s ease;
+        }
+
+        .chatbot-input input:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        
+        .chatbot-input button {
+            background: linear-gradient(45deg, var(--accent-blue), var(--accent-green));
+            border: none;
+            border-radius: 50%;
+            width: 45px;
+            height: 45px;
+            color: var(--bg-primary-dark);
+            cursor: pointer;
+            font-size: 1.1rem;
+            transition: transform 0.2s;
+        }
+        
+        .chatbot-input button:hover {
+            transform: scale(1.1);
+        }
+
+        .image-upload-label {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 50%;
+            width: 45px;
+            height: 45px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin-right: 10px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+            transition: all 0.2s ease;
+        }
+
+        .image-upload-label:hover {
+            background: var(--border-color);
+            color: var(--text-primary);
+        }
+        
+        .image-preview-container {
+            padding: 10px;
+            background: var(--bg-card);
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            position: relative;
+            gap: 10px;
+        }
+
+        .image-preview {
+            max-width: 80px;
+            max-height: 80px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .remove-image-btn {
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            background: rgba(255, 0, 0, 0.7);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            font-size: 1rem;
+            cursor: pointer;
+            line-height: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            opacity: 0.8;
+        }
+
+        .remove-image-btn:hover {
+            opacity: 1;
+        }
+
+        .message img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            margin-top: 10px;
+        }
+
+        /* ==========================================================================
+           Responsive Design
+           ========================================================================== */
+
+        @media (max-width: 900px) {
+            .split-view {
+                flex-direction: column;
+            }
+            .code-editor, .output-panel {
+                min-width: unset;
+            }
+            .container {
+                padding: 20px;
+                margin: 20px;
+            }
+        }
+
+        @media (max-width: 600px) {
+            .header h1 {
+                font-size: 2.5rem;
+            }
+            .hero-content h1 {
+                font-size: 3rem;
+            }
+            .hero-content p {
+                font-size: 1.1rem;
+            }
+            .language-tabs {
+                flex-direction: column;
+            }
+            .language-tab {
+                width: 100%;
+                text-align: center;
+                justify-content: center;
+            }
+            .chatbot-container, .chatbot-toggle-button {
+                bottom: 15px;
+                right: 15px;
+            }
             .chatbot-container {
                 width: 90%;
-                right: 5%;
+                height: 60vh;
                 left: 5%;
-                height: 70vh; /* Adjust height for smaller screens */
-                bottom: 10px;
-            }
-            .chatbot-toggle-button {
-                bottom: 10px;
-                right: 10px;
+                right: 5%;
             }
         }
     </style>
 </head>
-<body>
+<body class="dark">
 
 <div class="welcome-screen" id="welcomeScreen">
+    <div class="wavy-grid-bg"></div>
+    <div class="cubes-container">
+        <div class="cube">
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+        </div>
+        <div class="cube">
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+        </div>
+        <div class="cube">
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+        </div>
+        <div class="cube">
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+        </div>
+        <div class="cube">
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+            <div class="cube-face"></div>
+        </div>
+    </div>
     <div class="floating-icons">
         <i class="fas fa-bug floating-icon icon-1"></i>
         <i class="fas fa-code floating-icon icon-2"></i>
@@ -651,24 +856,32 @@ HTML_TEMPLATE = """
         <i class="fas fa-magic floating-icon icon-5"></i>
     </div>
     <div class="hero-content">
-        <h1>AI Code Debugger !! </h1>
+        <h1>AI Code Debugger</h1>
         <p>
             An AI-powered platform that writes, debugs, and executes code.
         </p>
         <div class="hero-btn-group">
-            <button class="hero-btn" onclick="showDebugger()">Get Started for Free</button>
+            <button class="hero-btn" onclick="showDebugger()">Get Started</button>
         </div>
     </div>
 </div>
 
-<div class="container" id="debuggerContainer">
+<div class="container" id="debuggerContainer" style="display: {{ 'block' if code or result or explanation or output else 'none' }};">
     <div class="header">
         <h1>AI Code Debugger</h1>
         <p>Fix and run Python, Java, Arduino, Verilog, SystemVerilog, JS, TS, HTML, and CSS code with AI</p>
+        <button id="theme-toggle" class="theme-toggle-button">
+            <i class="fas fa-sun"></i>
+        </button>
     </div>
     <div class="language-tabs">
         <div class="language-tab" onclick="switchLanguage('python')"><i class="fab fa-python"></i> Python</div>
         <div class="language-tab" onclick="switchLanguage('java')"><i class="fab fa-java"></i> Java</div>
+        <div class="language-tab" onclick="switchLanguage('cpp')"><i class="fas fa-cogs"></i> C++</div>
+        <div class="language-tab" onclick="switchLanguage('go')"><i class="fab fa-go"></i> Go</div>
+        <div class="language-tab" onclick="switchLanguage('rust')"><i class="fab fa-rust"></i> Rust</div>
+        <div class="language-tab" onclick="switchLanguage('ruby')"><i class="fas fa-gem"></i> Ruby</div>
+        <div class="language-tab" onclick="switchLanguage('kotlin')"><i class="fab fa-sketch"></i> Kotlin</div>
         <div class="language-tab" onclick="switchLanguage('javascript')"><i class="fab fa-js-square"></i> JS</div>
         <div class="language-tab" onclick="switchLanguage('typescript')"><i class="fas fa-microchip"></i> TS</div>
         <div class="language-tab" onclick="switchLanguage('html')"><i class="fab fa-html5"></i> HTML</div>
@@ -701,8 +914,8 @@ HTML_TEMPLATE = """
                     {% endfor %}
                 </div>
                 <div class="button-group">
-                    <button class="button" type="submit" id="debugButton">Debug Code</button>
-                    <a href="/download" class="button">Download</a>
+                    <button class="button debug" type="submit" id="debugButton">Debug Code</button>
+                    <a href="/download" class="button download">Download</a>
                 </div>
             </div>
             <div class="output-panel">
@@ -732,7 +945,15 @@ HTML_TEMPLATE = """
         <div class="message bot-message">Hello! How can I assist you today?</div>
         <div class="message bot-message">Try asking: 'What is the sum of 5 and 3?' or 'Tell me a fun fact about space.'</div>
     </div>
+    <div class="image-preview-container" id="imagePreviewContainer" style="display: none;">
+        <img id="imagePreview" src="" alt="Image Preview" class="image-preview" />
+        <button class="remove-image-btn" id="removeImageBtn">&times;</button>
+    </div>
     <div class="chatbot-input">
+        <label for="imageUpload" class="image-upload-label" id="imageUploadLabel">
+            <i class="fas fa-image"></i>
+        </label>
+        <input type="file" id="imageUpload" accept="image/*" style="display: none;" />
         <input type="text" id="chatInput" placeholder="Type your message..." />
         <button id="sendChatBtn"><i class="fas fa-paper-plane"></i></button>
     </div>
@@ -746,12 +967,17 @@ HTML_TEMPLATE = """
     const languageMode = {
         python: "python",
         java: "text/x-java",
+        cpp: "text/x-c++src",
+        go: "go",
+        rust: "rust",
+        ruby: "ruby",
+        kotlin: "text/x-java",
         javascript: "javascript",
         typescript: "javascript",
         html: "text/html",
         css: "text/css",
-        django: "python", // Django uses Python
-        react: "javascript", // React is JavaScript/JSX
+        django: "python",
+        react: "javascript",
         arduino: "text/x-c++src",
         verilog: "verilog",
         systemverilog: "verilog",
@@ -771,6 +997,12 @@ HTML_TEMPLATE = """
     let chatbotMessages;
     let debuggerContainer;
     let languageTabs;
+    let themeToggleButton;
+    let imageUpload;
+    let imagePreviewContainer;
+    let imagePreview;
+    let removeImageBtn;
+    let selectedImageFile = null;
 
     function initializeElements() {
         debugForm = document.querySelector("form");
@@ -784,6 +1016,11 @@ HTML_TEMPLATE = """
         chatbotMessages = document.getElementById('chatbotMessages');
         debuggerContainer = document.getElementById('debuggerContainer');
         languageTabs = document.querySelectorAll(".language-tab");
+        themeToggleButton = document.getElementById('theme-toggle');
+        imageUpload = document.getElementById('imageUpload');
+        imagePreviewContainer = document.getElementById('imagePreviewContainer');
+        imagePreview = document.getElementById('imagePreview');
+        removeImageBtn = document.getElementById('removeImageBtn');
     }
 
     function initializeCodeMirror(initialLanguage, initialCode) {
@@ -827,15 +1064,13 @@ HTML_TEMPLATE = """
         }
 
         if (javaMainClassContainer) { 
-            javaMainClassContainer.style.display = (lang === 'java') ? 'block' : 'none';
+            javaMainClassContainer.style.display = (lang === 'java' || lang === 'kotlin') ? 'block' : 'none';
         }
         if (pythonInputPromptsContainer) { 
-            // Only show for Python and Django (Python-based framework)
             const showPythonPrompts = ['python', 'django'].includes(lang);
             pythonInputPromptsContainer.style.display = showPythonPrompts ? 'block' : 'none';
         }
 
-        // Make sure the chatbot button is visible when the debugger is active
         updateChatbotVisibility(true);
     }
 
@@ -862,9 +1097,10 @@ HTML_TEMPLATE = """
     function toggleChatbot() {
         console.log("toggleChatbot() called.");
         if (chatbotContainer && chatbotToggleButton) {
-            chatbotContainer.classList.toggle('active');
-            chatbotToggleButton.classList.toggle('hidden');
-            if (chatbotContainer.classList.contains('active')) {
+            const isActive = chatbotContainer.classList.toggle('active');
+            chatbotToggleButton.style.display = isActive ? 'none' : 'flex';
+            
+            if (isActive) {
                 if (chatbotMessages) {
                     chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
                 }
@@ -886,29 +1122,40 @@ HTML_TEMPLATE = """
             return;
         }
         const userMessage = chatInput.value.trim();
-        if (userMessage === '') return;
+        if (userMessage === '' && !selectedImageFile) return;
 
         const userMessageDiv = document.createElement('div');
         userMessageDiv.classList.add('message', 'user-message');
-        userMessageDiv.textContent = userMessage;
+        if (userMessage) {
+            userMessageDiv.textContent = userMessage;
+        }
+        if (selectedImageFile) {
+            const imgElement = document.createElement('img');
+            imgElement.src = URL.createObjectURL(selectedImageFile);
+            imgElement.alt = "User provided image";
+            userMessageDiv.appendChild(imgElement);
+        }
         chatbotMessages.appendChild(userMessageDiv);
         chatInput.value = '';
         chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
 
         const typingIndicatorDiv = document.createElement('div');
         typingIndicatorDiv.classList.add('typing-indicator', 'bot-message');
-        typingIndicatorDiv.innerHTML = '<span>.</span><span>.</span><span>.</span>';
+        typingIndicatorDiv.innerHTML = '<span></span><span></span><span></span>';
         chatbotMessages.appendChild(typingIndicatorDiv);
         chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
         sendChatBtn.disabled = true;
 
+        const formData = new FormData();
+        formData.append('message', userMessage);
+        if (selectedImageFile) {
+            formData.append('image', selectedImageFile);
+        }
+
         try {
             const response = await fetch('/send_chat_message', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ message: userMessage }),
+                body: formData,
             });
 
             if (!response.ok) {
@@ -943,6 +1190,56 @@ HTML_TEMPLATE = """
         } finally {
             sendChatBtn.disabled = false;
             chatInput.focus();
+            removeImage();
+        }
+    }
+
+    function removeImage() {
+        selectedImageFile = null;
+        imageUpload.value = null;
+        imagePreview.src = '';
+        imagePreviewContainer.style.display = 'none';
+    }
+
+    // Theme toggle functionality
+    function toggleTheme() {
+        const body = document.body;
+        const icon = themeToggleButton.querySelector('i');
+        
+        if (body.classList.contains('dark')) {
+            body.classList.remove('dark');
+            body.classList.add('light');
+            icon.classList.remove('fa-sun');
+            icon.classList.add('fa-moon');
+            localStorage.setItem('theme', 'light');
+        } else {
+            body.classList.remove('light');
+            body.classList.add('dark');
+            icon.classList.remove('fa-moon');
+            icon.classList.add('fa-sun');
+            localStorage.setItem('theme', 'dark');
+        }
+    }
+
+    // Initialize theme based on user's preference or system setting
+    function initializeTheme() {
+        const savedTheme = localStorage.getItem('theme');
+        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const body = document.body;
+        const icon = themeToggleButton.querySelector('i');
+
+        if (savedTheme) {
+            body.classList.add(savedTheme);
+            if (savedTheme === 'light') {
+                icon.classList.remove('fa-sun');
+                icon.classList.add('fa-moon');
+            }
+        } else if (prefersDark) {
+            body.classList.add('dark');
+        } else {
+            body.classList.add('light');
+            icon.classList.remove('fa-sun');
+            icon.classList.add('fa-moon');
         }
     }
 
@@ -950,6 +1247,7 @@ HTML_TEMPLATE = """
         console.log("DOMContentLoaded fired.");
         
         initializeElements();
+        initializeTheme();
 
         const initialLanguage = "{{ language }}";
         const initialCode = `{{ code | js_string }}`; 
@@ -989,15 +1287,37 @@ HTML_TEMPLATE = """
                 }
             });
         }
+        
+        if (themeToggleButton) {
+            themeToggleButton.addEventListener('click', toggleTheme);
+        }
 
+        if (imageUpload) {
+            imageUpload.addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    selectedImageFile = file;
+                    const reader = new FileReader();
+                    reader.onload = function(event) {
+                        imagePreview.src = event.target.result;
+                        imagePreviewContainer.style.display = 'flex';
+                        chatbotMessages.scrollTop = chatbotMessages.scrollHeight;
+                    };
+                    reader.readAsDataURL(file);
+                }
+            });
+        }
+
+        if (removeImageBtn) {
+            removeImageBtn.addEventListener('click', removeImage);
+        }
+        
         if (debugButton) {
             debugButton.classList.remove('loading');
             debugButton.innerHTML = 'Debug Code';
             debugButton.disabled = false;
         }
         
-        // This is the core fix: Ensure the chatbot button is visible
-        // whenever the debugger container is shown.
         if (document.getElementById('debuggerContainer').style.display !== 'none') {
             updateChatbotVisibility(true);
         } else {
@@ -1009,12 +1329,6 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
-
-# The Python code below is identical to our last conversation, but I'll include it for completeness.
-
-# Global state
-fixed_code_result = ""
-explanation_text = ""
 
 def _gemini_api_call_with_retries(func, *args, max_retries=5, initial_delay=1, **kwargs):
     delay = initial_delay
@@ -1028,8 +1342,7 @@ def _gemini_api_call_with_retries(func, *args, max_retries=5, initial_delay=1, *
     raise Exception(f"Failed after {max_retries} retries.")
 
 def preprocess_code(code):
-    # Update to handle new languages
-    code = re.sub(r'```(python|java|arduino|verilog|systemverilog|uvm|javascript|typescript|html|css|django|react)\s*', '', code, flags=re.IGNORECASE)
+    code = re.sub(r'```(python|java|cpp|go|rust|ruby|kotlin|arduino|verilog|systemverilog|uvm|javascript|typescript|html|css|django|react)\s*', '', code, flags=re.IGNORECASE)
     code = code.replace("```", "")
     code = code.replace("\t", "    ")
     code = re.sub(r'[^\x00-\x7F]+', '', code)
@@ -1072,6 +1385,63 @@ Requirements:
 1. Include main class '{main_class}'
 2. Add necessary imports and fix syntax errors.
 3. Ensure the code is runnable.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        elif language == "cpp":
+            prompt = f"""Fix this C++ code:
+{code}
+Requirements:
+1. Correct syntax and logical errors.
+2. Add necessary includes (e.g., #include <iostream>).
+3. Ensure the code is runnable.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        elif language == "go":
+            prompt = f"""Fix this Go code:
+{code}
+Requirements:
+1. Correct syntax and logical errors.
+2. Add necessary imports and ensure proper package structure.
+3. Ensure the code is runnable.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        elif language == "rust":
+            prompt = f"""Fix this Rust code:
+{code}
+Requirements:
+1. Correct syntax and ownership errors.
+2. Add necessary use statements and ensure proper function signatures.
+3. Ensure the code is runnable and passes the borrow checker.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        elif language == "ruby":
+            prompt = f"""Fix this Ruby code:
+{code}
+Requirements:
+1. Correct syntax and logical errors.
+2. Ensure the code is runnable.
+3. Provide clear and concise comments where necessary.
+Format:
+<corrected_code>
+---EXPLANATION---
+<explanation>"""
+        elif language == "kotlin":
+            class_match = re.search(r'fun\s+main', code)
+            main_class = "MainKt" if class_match else "Main"
+            prompt = f"""Fix this Kotlin code:
+{code}
+Requirements:
+1. Correct syntax and logical errors.
+2. Add necessary imports.
+3. Ensure the code is runnable, typically with a main function.
 Format:
 <corrected_code>
 ---EXPLANATION---
@@ -1145,6 +1515,136 @@ Format:
     except Exception as e:
         fixed_code_result = f"\u274c Error contacting AI: {str(e)}"
         explanation_text = "Could not generate explanation due to an error or repeated API failures."
+
+def execute_cpp_code(code):
+    temp_dir = tempfile.mkdtemp()
+    source_path = os.path.join(temp_dir, "main.cpp")
+    executable_path = os.path.join(temp_dir, "main")
+    try:
+        with open(source_path, 'w') as f:
+            f.write(code)
+        
+        compile_command = ['g++', source_path, '-o', executable_path]
+        compile_result = subprocess.run(compile_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
+        if compile_result.returncode != 0:
+            return f"\u274c Compilation Error:\n{compile_result.stderr}"
+
+        run_command = [executable_path]
+        run_result = subprocess.run(run_command, cwd=temp_dir, capture_output=True, text=True, timeout=10)
+        if run_result.returncode != 0:
+            return f"\u274c Runtime Error:\n{run_result.stderr}"
+        
+        return run_result.stdout or "\u2705 Ran successfully, no output."
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
+    except Exception as e:
+        return f"\u274c Execution error: {str(e)}"
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error during C++ cleanup: {e}")
+
+def execute_go_code(code):
+    temp_dir = tempfile.mkdtemp()
+    source_path = os.path.join(temp_dir, "main.go")
+    try:
+        with open(source_path, 'w') as f:
+            f.write(code)
+            
+        run_command = ['go', 'run', source_path]
+        run_result = subprocess.run(run_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
+        
+        if run_result.returncode != 0:
+            return f"\u274c Runtime Error:\n{run_result.stderr}"
+        
+        return run_result.stdout or "\u2705 Ran successfully, no output."
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
+    except Exception as e:
+        return f"\u274c Execution error: {str(e)}"
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error during Go cleanup: {e}")
+
+def execute_rust_code(code):
+    temp_dir = tempfile.mkdtemp()
+    source_path = os.path.join(temp_dir, "main.rs")
+    executable_path = os.path.join(temp_dir, "main")
+    try:
+        with open(source_path, 'w') as f:
+            f.write(code)
+            
+        compile_command = ['rustc', source_path, '-o', executable_path]
+        compile_result = subprocess.run(compile_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
+        if compile_result.returncode != 0:
+            return f"\u274c Compilation Error:\n{compile_result.stderr}"
+            
+        run_command = [executable_path]
+        run_result = subprocess.run(run_command, cwd=temp_dir, capture_output=True, text=True, timeout=10)
+        if run_result.returncode != 0:
+            return f"\u274c Runtime Error:\n{run_result.stderr}"
+            
+        return run_result.stdout or "\u2705 Ran successfully, no output."
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
+    except Exception as e:
+        return f"\u274c Execution error: {str(e)}"
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error during Rust cleanup: {e}")
+
+def execute_ruby_code(code):
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".rb", mode='w')
+    temp_file.write(code)
+    temp_file.close()
+    try:
+        run_command = ['ruby', temp_file.name]
+        run_result = subprocess.run(run_command, capture_output=True, text=True, timeout=10)
+        if run_result.returncode != 0:
+            return f"\u274c Runtime Error:\n{run_result.stderr}"
+        return run_result.stdout or "\u2705 Ran successfully, no output."
+    except FileNotFoundError:
+        return "\u274c Error: Ruby interpreter is not installed or not in your system's PATH."
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
+    except Exception as e:
+        return f"\u274c Execution error: {str(e)}"
+    finally:
+        os.remove(temp_file.name)
+
+def execute_kotlin_code(code, main_class):
+    temp_dir = tempfile.mkdtemp()
+    source_path = os.path.join(temp_dir, f"{main_class}.kt")
+    output_jar = os.path.join(temp_dir, f"{main_class}.jar")
+    try:
+        with open(source_path, 'w') as f:
+            f.write(code)
+        
+        compile_command = ['kotlinc', source_path, '-include-runtime', '-d', output_jar]
+        compile_result = subprocess.run(compile_command, cwd=temp_dir, capture_output=True, text=True, timeout=15)
+        if compile_result.returncode != 0:
+            return f"\u274c Compilation Error:\n{compile_result.stderr}"
+        
+        run_command = ['java', '-jar', output_jar]
+        run_result = subprocess.run(run_command, cwd=temp_dir, capture_output=True, text=True, timeout=10)
+        if run_result.returncode != 0:
+            return f"\u274c Runtime Error:\n{run_result.stderr}"
+            
+        return run_result.stdout or "\u2705 Ran successfully, no output."
+    except subprocess.TimeoutExpired:
+        return "\u274c Execution timed out."
+    except Exception as e:
+        return f"\u274c Execution error: {str(e)}"
+    finally:
+        try:
+            shutil.rmtree(temp_dir)
+        except Exception as e:
+            print(f"Error during Kotlin cleanup: {e}")
 
 def execute_java_code(code, main_class):
     temp_dir = tempfile.mkdtemp()
@@ -1302,6 +1802,18 @@ def validate_and_execute_code(code, language, test_inputs=None, java_main_class=
                 sys.stdout = old_stdout
         elif language == "java":
             return execute_java_code(code, java_main_class)
+        elif language == "cpp":
+            return execute_cpp_code(code)
+        elif language == "go":
+            return execute_go_code(code)
+        elif language == "rust":
+            return execute_rust_code(code)
+        elif language == "ruby":
+            return execute_ruby_code(code)
+        elif language == "kotlin":
+            class_match = re.search(r'fun\s+main', code)
+            main_class = "MainKt" if class_match else "Main"
+            return execute_kotlin_code(code, main_class)
         elif language == "arduino":
             return execute_arduino_code(code)
         elif language in ["verilog", "systemverilog", "uvm"]:
@@ -1311,10 +1823,9 @@ def validate_and_execute_code(code, language, test_inputs=None, java_main_class=
         elif language == "typescript":
             return execute_typescript_code(code)
         elif language in ["html", "css", "django", "react"]:
-            # These are frameworks or markup/style languages that can't be "executed" as a single file.
             if language in ["django", "react"]:
                 return f"\u2705 Code fixed successfully. Note: {language.capitalize()} requires a full project setup to run. The AI has provided the corrected snippet."
-            else: # HTML/CSS
+            else:
                 return f"\u2705 Code fixed successfully. To see this {language.upper()} code in action, you need to open it in a web browser. The execution panel shows the raw, corrected code."
     except Exception as e:
         return f"\u274c Execution failed: {str(e)}"
@@ -1359,11 +1870,15 @@ def index():
 @app.route("/download")
 def download():
     global fixed_code_result
-    ext = ".txt" # Default extension
+    ext = ".txt"
     if "void setup()" in fixed_code_result or "void loop()" in fixed_code_result:
         ext = ".ino"
-    elif "public class" in fixed_code_result or "class " in fixed_code_result:
+    elif "public class" in fixed_code_result:
         ext = ".java"
+    elif "func main()" in fixed_code_result:
+        ext = ".go"
+    elif "fn main()" in fixed_code_result:
+        ext = ".rs"
     elif re.search(r'module\s+', fixed_code_result, re.IGNORECASE) or re.search(r'class\s+extends\s+uvm', fixed_code_result, re.IGNORECASE):
         if "logic" in fixed_code_result or "interface" in fixed_code_result or "class " in fixed_code_result:
             ext = ".sv"
@@ -1391,9 +1906,12 @@ def download():
 
 @app.route("/send_chat_message", methods=["POST"])
 def send_chat_message():
-    user_message = request.json.get("message")
-    if not user_message:
-        return jsonify({"response": "Error: No message provided."}), 400
+    user_message = request.form.get("message")
+    uploaded_image = request.files.get("image")
+    
+    if not user_message and not uploaded_image:
+        return jsonify({"response": "Error: No message or image provided."}), 400
+
     try:
         model = genai.GenerativeModel("gemini-1.5-flash",
                                      safety_settings={
@@ -1402,9 +1920,19 @@ def send_chat_message():
                                          HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
                                          HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
                                      })
-        chat_session = model.start_chat(history=[])
-        response = _gemini_api_call_with_retries(chat_session.send_message, user_message)
+
+        parts = []
+        if user_message:
+            parts.append(user_message)
+        
+        if uploaded_image:
+            image_data = uploaded_image.read()
+            img = Image.open(io.BytesIO(image_data))
+            parts.append(img)
+
+        response = _gemini_api_call_with_retries(model.generate_content, parts)
         ai_response = response.text
+
         return jsonify({"response": ai_response})
     except Exception as e:
         print(f"Error in AI chat response: {e}")
@@ -1413,30 +1941,55 @@ def send_chat_message():
 if __name__ == "__main__":
     print("Checking for external tools:")
     try:
-        java_check = subprocess.run(['java', '-version'], capture_output=True, text=True, check=False)
-        print("Java:", java_check.stderr.split('\n')[0].strip() if java_check.stderr else "Not found.")
-    except Exception as e:
-        print(f"\u26a0\ufe0f Java not found or not added to PATH. Java execution will not work. Error: {e}")
+        subprocess.run(['java', '-version'], capture_output=True, text=True, check=True)
+        print("\u2705 Java is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Java not found. Java/Kotlin execution will not work.")
     try:
-        arduino_check = subprocess.run(['arduino-cli', 'version'], capture_output=True, text=True, check=False)
-        print("Arduino CLI:", arduino_check.stdout.strip().split('\n')[0].strip() if arduino_check.stdout else "Not found.")
-    except Exception as e:
-        print(f"\u26a0\ufe0f Arduino CLI not found or not added to PATH. Arduino compilation will not work. Error: {e}")
+        subprocess.run(['kotlinc', '-version'], capture_output=True, text=True, check=True)
+        print("\u2705 Kotlin is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Kotlin not found. Kotlin compilation will not work.")
     try:
-        iverilog_check = subprocess.run(['iverilog', '-v'], capture_output=True, text=True, check=False)
-        print("Icarus Verilog:", iverilog_check.stdout.strip().split('\n')[0].strip() if iverilog_check.stdout else "Not found.")
-    except Exception as e:
-        print(f"\u26a0\ufe0f Icarus Verilog (iverilog) not found or not added to PATH. Verilog/SystemVerilog/UVM compilation will not work. Error: {e}")
+        subprocess.run(['g++', '--version'], capture_output=True, text=True, check=True)
+        print("\u2705 g++ is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f g++ not found. C++ compilation will not work.")
     try:
-        node_check = subprocess.run(['node', '-v'], capture_output=True, text=True, check=False)
-        print("Node.js:", node_check.stdout.strip() if node_check.stdout else "Not found.")
-    except Exception as e:
-        print(f"\u26a0\ufe0f Node.js not found or not added to PATH. JavaScript and TypeScript execution will not work. Error: {e}")
+        subprocess.run(['go', 'version'], capture_output=True, text=True, check=True)
+        print("\u2705 Go is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Go not found. Go execution will not work.")
     try:
-        tsc_check = subprocess.run(['tsc', '-v'], capture_output=True, text=True, check=False)
-        print("TypeScript Compiler (tsc):", tsc_check.stdout.strip() if tsc_check.stdout else "Not found.")
-    except Exception as e:
-        print(f"\u26a0\ufe0f TypeScript compiler ('tsc') not found. TypeScript compilation will not work. Error: {e}")
+        subprocess.run(['rustc', '--version'], capture_output=True, text=True, check=True)
+        print("\u2705 Rust is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Rust not found. Rust compilation will not work.")
+    try:
+        subprocess.run(['ruby', '-v'], capture_output=True, text=True, check=True)
+        print("\u2705 Ruby is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Ruby not found. Ruby execution will not work.")
+    try:
+        subprocess.run(['arduino-cli', 'version'], capture_output=True, text=True, check=True)
+        print("\u2705 Arduino CLI is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Arduino CLI not found. Arduino compilation will not work.")
+    try:
+        subprocess.run(['iverilog', '-v'], capture_output=True, text=True, check=True)
+        print("\u2705 Icarus Verilog is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Icarus Verilog not found. Verilog/SystemVerilog/UVM compilation will not work.")
+    try:
+        subprocess.run(['node', '-v'], capture_output=True, text=True, check=True)
+        print("\u2705 Node.js is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f Node.js not found. JavaScript/TypeScript execution will not work.")
+    try:
+        subprocess.run(['tsc', '-v'], capture_output=True, text=True, check=True)
+        print("\u2705 TypeScript compiler (tsc) is installed.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print("\u26a0\ufe0f TypeScript compiler (tsc) not found. TypeScript compilation will not work.")
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
